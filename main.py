@@ -6,9 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 from gtts import gTTS
-from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
+from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips, ColorClip
 
-app = FastAPI(title="AI Content Factory Autonomous Video Studio v4.2", version="4.2")
+app = FastAPI(title="AI Content Factory Autonomous Video Studio v4.3", version="4.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,7 +26,7 @@ class VideoRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "Online", "engine": "Autonomous Cloud Video Rendering Engine v4.2"}
+    return {"status": "Online", "engine": "Autonomous Cloud Video Rendering Engine v4.3"}
 
 @app.post("/generate-video")
 async def generate_video(req: VideoRequest):
@@ -43,7 +43,7 @@ async def generate_video(req: VideoRequest):
             f"Kripya is safar mein ant tak bane rahiye."
         )
         
-        # Generate Audio using gTTS
+        # 1. Generate Audio using gTTS
         tts = gTTS(text=narration_text, lang=req.language, slow=False)
         audio_fd, audio_path = tempfile.mkstemp(suffix=".mp3")
         os.close(audio_fd)
@@ -54,19 +54,20 @@ async def generate_video(req: VideoRequest):
         total_duration = audio_clip.duration
         
         visual_prompts = [
-            f"{topic} 3d pixar style cute character emotional expression cinematic lighting masterpiece",
-            f"{topic} dramatic cinematic scene 3d animation digital art high detail vibrant colors",
-            f"{topic} touching emotional storytelling 3d render atmospheric lighting depth of field"
+            "cute 3d pixar style character emotional expression cinematic lighting masterpiece",
+            "touching emotional dramatic scene 3d animation digital art high detail",
+            "heartwarming atmospheric storytelling 3d render vibrant colors"
         ]
         
         clip_duration = max(2.5, total_duration / len(visual_prompts))
         image_clips = []
         
         for idx, p in enumerate(visual_prompts):
-            img_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(p)}?width=1080&height=1920&nologo=true&seed={1500+idx}"
+            img_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(p)}?width=1080&height=1920&nologo=true&seed={1600+idx}"
             
+            image_added = False
             try:
-                img_response = requests.get(img_url, timeout=20)
+                img_response = requests.get(img_url, timeout=15)
                 if img_response.status_code == 200:
                     img_fd, img_path = tempfile.mkstemp(suffix=".jpg")
                     os.close(img_fd)
@@ -76,13 +77,16 @@ async def generate_video(req: VideoRequest):
                     
                     img_clip = ImageClip(img_path).set_duration(clip_duration)
                     image_clips.append(img_clip)
+                    image_added = True
             except Exception:
                 pass
-                
-        if not image_clips:
-            audio_clip.close()
-            raise HTTPException(status_code=500, detail="Failed to generate visual assets.")
             
+            # Fallback if image download fails: Create a cinematic dark blue background clip
+            if not image_added:
+                fallback_clip = ColorClip(size=(1080, 1920), color=[15, 23, 42]).set_duration(clip_duration)
+                image_clips.append(fallback_clip)
+                
+        # Stitch Video Sequence
         video_sequence = concatenate_videoclips(image_clips, method="compose")
         final_video = video_sequence.set_audio(audio_clip)
         
@@ -115,7 +119,7 @@ async def generate_video(req: VideoRequest):
             "style": req.style,
             "duration_seconds": round(total_duration, 2),
             "video_url": f"data:video/mp4;base64,{video_base64}",
-            "status": "Multi-Scene MP4 Video Rendered Successfully"
+            "status": "Robust MP4 Video Rendered Successfully"
         }
 
     except Exception as e:
