@@ -1,14 +1,14 @@
 import os
 import tempfile
+import base64
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import requests
 from gtts import gTTS
 from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
 
-app = FastAPI(title="AI Content Factory Autonomous Video Studio v3.7", version="3.7")
+app = FastAPI(title="AI Content Factory Autonomous Video Studio v3.8", version="3.8")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,10 +26,11 @@ class VideoRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "Online", "engine": "Autonomous Cloud Video Rendering Engine v3.7"}
+    return {"status": "Online", "engine": "Autonomous Cloud Video Rendering Engine v3.8"}
 
 @app.post("/generate-video")
 async def generate_video(req: VideoRequest):
+    temp_files = []
     try:
         topic = req.topic.strip()
         if not topic:
@@ -48,6 +49,7 @@ async def generate_video(req: VideoRequest):
         audio_fd, audio_path = tempfile.mkstemp(suffix=".mp3")
         os.close(audio_fd)
         tts.save(audio_path)
+        temp_files.append(audio_path)
         
         audio_clip = AudioFileClip(audio_path)
         total_duration = audio_clip.duration
@@ -61,7 +63,6 @@ async def generate_video(req: VideoRequest):
         
         clip_duration = max(2.0, total_duration / len(prompts))
         image_clips = []
-        image_paths = []
         
         for idx, p in enumerate(prompts):
             img_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(p)}?width=1080&height=1920&nologo=true&seed={950+idx}"
@@ -72,7 +73,7 @@ async def generate_video(req: VideoRequest):
                 os.close(img_fd)
                 with open(img_path, "wb") as f:
                     f.write(img_response.content)
-                image_paths.append(img_path)
+                temp_files.append(img_path)
                 
                 img_clip = ImageClip(img_path).set_duration(clip_duration)
                 image_clips.append(img_clip)
@@ -87,6 +88,7 @@ async def generate_video(req: VideoRequest):
         
         vid_fd, vid_path = tempfile.mkstemp(suffix=".mp4")
         os.close(vid_fd)
+        temp_files.append(vid_path)
         
         final_video.write_videofile(
             vid_path, 
@@ -97,28 +99,33 @@ async def generate_video(req: VideoRequest):
             logger=None
         )
         
-        # Cleanup intermediate clips safely
         audio_clip.close()
         final_video.close()
         
-        for p in image_paths:
-            try:
-                if os.path.exists(p):
-                    os.remove(p)
-            except Exception:
-                pass
-        try:
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
-        except Exception:
-            pass
+        # 4. Encode MP4 video to Base64 so frontend/GAS can handle it smoothly via JSON
+        with open(vid_path, "rb") as video_file:
+            video_bytes = video_file.read()
+            video_base64 = base64.b64encode(video_bytes).decode('utf-8')
 
-        # 4. Return the complete MP4 video file directly to the frontend/browser
-        return FileResponse(
-            vid_path, 
-            media_type="video/mp4", 
-            filename="ai_generated_story.mp4"
-        )
+        job_id = f"MP4-JOB-{os.urandom(4).hex()}"
+        
+        return {
+            "success": True,
+            "job_id": job_id,
+            "topic": topic,
+            "style": req.style,
+            "duration_seconds": round(total_duration, 2),
+            "video_url": f"data:video/mp4;base64,{video_base64}",
+            "status": "Multi-Scene MP4 Video Rendered Successfully"
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+        
+    finally:
+        for path in temp_files:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
