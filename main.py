@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from gtts import gTTS
 from moviepy.editor import ColorClip, AudioFileClip, concatenate_videoclips
 
-app = FastAPI(title="AI Content Factory Stable Studio v4.5", version="4.5")
+app = FastAPI(title="AI Content Factory Stable Studio v4.6", version="4.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,7 +25,7 @@ class VideoRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "Online", "engine": "Stable Cloud Video Engine v4.5"}
+    return {"status": "Online", "engine": "Stable Cloud Video Engine v4.6"}
 
 @app.post("/generate-video")
 async def generate_video(req: VideoRequest):
@@ -38,11 +38,11 @@ async def generate_video(req: VideoRequest):
         narration_text = (
             f"Namaskar doston. Aaj ka hamara vishesh vishay hai: {topic}. "
             f"Is kahani ke madhyam se hum yeh jaanenge ki kaise hamare jeevan mein "
-            f"chote-chote badlav sabse bade maayne rakhte hain. "
-            f"Kripya is safar mein ant तक bane rahiye."
+            f"chote-chote vichar aur badlav sabse bade maayne rakhte hain. "
+            f"Kripya is safar mein ant tak bane rahiye."
         )
         
-        # 1. Generate Audio using gTTS safely
+        # 1. Generate Audio using gTTS
         tts = gTTS(text=narration_text, lang=req.language, slow=False)
         audio_fd, audio_path = tempfile.mkstemp(suffix=".mp3")
         os.close(audio_fd)
@@ -52,9 +52,8 @@ async def generate_video(req: VideoRequest):
         audio_clip = AudioFileClip(audio_path)
         total_duration = audio_clip.duration
         
-        # 2. Create stable cinematic background color clips to avoid external API timeouts / 502 errors
+        # 2. Create stable background video clips to prevent server timeouts
         clip_duration = max(3.0, total_duration / 3)
-        
         bg_colors = [
             [15, 23, 42],   # Dark Slate Blue
             [30, 41, 59],   # Lighter Slate
