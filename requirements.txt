@@ -1,7 +1,7 @@
-fastapi==0.112.0
-uvicorn==0.30.6
+fastapi==0.109.0
+pydantic==2.5.3
+uvicorn==0.27.0
 requests==2.32.3
-pydantic==2.8.2
-gTTS
+gTTS==2.5.3
 numpy<2
 moviepy==1.0.3
