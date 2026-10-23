@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from gtts import gTTS
 from moviepy.editor import ColorClip, AudioFileClip, concatenate_videoclips
 
-app = FastAPI(title="AI Content Factory Autonomous Studio", version="7.0")
+app = FastAPI(title="AI Content Factory Final Studio", version="7.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,7 +25,7 @@ class VideoRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "Online", "engine": "Autonomous Master Studio v7.0"}
+    return {"status": "Online", "engine": "Autonomous Master Studio v7.1"}
 
 @app.post("/generate-video")
 async def generate_video(req: VideoRequest):
@@ -49,12 +49,12 @@ async def generate_video(req: VideoRequest):
         audio_clip = AudioFileClip(audio_path)
         total_duration = audio_clip.duration
         
-        # 2. Optimized Lightweight Visual Background Engine (Zero memory leaks, prevents 502 errors)
+        # 2. Optimized Lightweight Visual Background Engine with distinct changing background colors for visual verification
         clip_duration = max(3.0, total_duration / 3)
         bg_colors = [
-            [15, 23, 42],   # Deep Slate Blue
-            [30, 41, 59],   # Slate Grey
-            [17, 24, 39]    # Dark Indigo
+            [30, 58, 138],  # Royal Blue
+            [88, 28, 135],  # Deep Purple
+            [15, 23, 42]    # Dark Slate
         ]
         
         image_clips = []
@@ -69,12 +69,14 @@ async def generate_video(req: VideoRequest):
         os.close(vid_fd)
         temp_files.append(vid_path)
         
+        # FIXED: Added -pix_fmt yuv420p so browsers properly render video frames instead of black screen
         final_video.write_videofile(
             vid_path, 
             fps=20, 
             codec="libx264", 
             audio_codec="aac", 
-            preset="ultrafast", 
+            preset="ultrafast",
+            ffmpeg_params=["-pix_fmt", "yuv420p"],
             logger=None
         )
         
