@@ -1,14 +1,15 @@
 import os
 import tempfile
 import base64
+import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
-from gtts import gTTS
+import edge_tts
 from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
 
-app = FastAPI(title="AI Content Factory Autonomous Video Studio v3.9", version="3.9")
+app = FastAPI(title="AI Content Factory Professional Studio v4.1", version="4.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,7 +27,12 @@ class VideoRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "Online", "engine": "Autonomous Cloud Video Rendering Engine v3.9"}
+    return {"status": "Online", "engine": "Professional Neural Video Engine v4.1"}
+
+async def generate_natural_voice(text: str, output_path: str):
+    # Using Microsoft Neural Professional Hindi Voice (SwaraNeural)
+    communicate = edge_tts.Communicate(text, "hi-IN-SwaraNeural")
+    await communicate.save(output_path)
 
 @app.post("/generate-video")
 async def generate_video(req: VideoRequest):
@@ -36,36 +42,35 @@ async def generate_video(req: VideoRequest):
         if not topic:
             raise HTTPException(status_code=400, detail="Topic is required.")
         
-        # Dynamic Narration Script in Hindi
-        narration_text = (
-            f"Namaskar doston. Aaj ka hamara vishesh vishay hai: {topic}. "
-            f"Is kahani ke madhyam se hum yeh jaanenge ki kaise hamare jeevan mein "
-            f"chote-chote badlav aur rishte sabse bade maayne rakhte hain. "
-            f"Kripya is safar mein ant tak bane rahiye."
+        # Professional Script Generation
+        script_text = (
+            f"Namaskar doston. Aaj ka hamara vishay hai: {topic}. "
+            f"Zindagi ke safar mein har mod par kuch aisi baatein hoti hain jo hamari rooh ko choo leti hain. "
+            f"Aaiye is khubsurat kahani ko gehraai se samajhte hain aur iske asli sach ko jaante hain."
         )
         
-        # 1. Generate Voiceover Audio using gTTS
-        tts = gTTS(text=narration_text, lang=req.language, slow=False)
+        # 1. Generate Natural Neural Voiceover Audio
         audio_fd, audio_path = tempfile.mkstemp(suffix=".mp3")
         os.close(audio_fd)
-        tts.save(audio_path)
         temp_files.append(audio_path)
+        
+        await generate_natural_voice(script_text, audio_path)
         
         audio_clip = AudioFileClip(audio_path)
         total_duration = audio_clip.duration
         
-        # 2. Safe English 3D Visual Prompts (Avoids emoji/script crash on image generator)
-        visual_prompts = [
-            "cute 3d pixar style character emotional storytelling cinematic lighting masterpiece",
-            "touching emotional dramatic scene 3d animation vibrant colors high detail",
-            "heartwarming family moment 3d render digital art cinematic atmosphere"
+        # 2. Multiple Cinematic 3D Visual Prompts for Scene Transitions
+        prompts = [
+            f"{topic} 3d pixar style cute character emotional expression cinematic lighting masterpiece",
+            f"{topic} dramatic cinematic scene 3d animation digital art high detail vibrant colors",
+            f"{topic} touching emotional storytelling 3d render atmospheric lighting depth of field"
         ]
         
-        clip_duration = max(2.0, total_duration / len(visual_prompts))
+        clip_duration = max(2.5, total_duration / len(prompts))
         image_clips = []
         
-        for idx, p in enumerate(visual_prompts):
-            img_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(p)}?width=1080&height=1920&nologo=true&seed={1200+idx}"
+        for idx, p in enumerate(prompts):
+            img_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(p)}?width=1080&height=1920&nologo=true&seed={1500+idx}"
             
             try:
                 img_response = requests.get(img_url, timeout=20)
@@ -76,17 +81,19 @@ async def generate_video(req: VideoRequest):
                         f.write(img_response.content)
                     temp_files.append(img_path)
                     
+                    # Create Image Clip with smooth Ken Burns Zoom Effect
                     img_clip = ImageClip(img_path).set_duration(clip_duration)
+                    # Apply smooth resize/zoom effect for professional motion
+                    img_clip = img_clip.resize(lambda t: 1.0 + 0.04 * t) 
                     image_clips.append(img_clip)
             except Exception:
                 pass
                 
-        # Fallback if image generation fails
         if not image_clips:
             audio_clip.close()
-            raise HTTPException(status_code=500, detail="Failed to generate visual assets from cloud AI generator.")
+            raise HTTPException(status_code=500, detail="Failed to generate visual assets.")
             
-        # 3. Stitch Images & Audio into final MP4 video
+        # 3. Stitch Scenes and Neural Audio into Final MP4 Video
         video_sequence = concatenate_videoclips(image_clips, method="compose")
         final_video = video_sequence.set_audio(audio_clip)
         
@@ -106,12 +113,12 @@ async def generate_video(req: VideoRequest):
         audio_clip.close()
         final_video.close()
         
-        # 4. Encode to Base64 for smooth frontend rendering
+        # 4. Convert MP4 to Base64 for web player
         with open(vid_path, "rb") as video_file:
             video_bytes = video_file.read()
             video_base64 = base64.b64encode(video_bytes).decode('utf-8')
 
-        job_id = f"MP4-JOB-{os.urandom(4).hex()}"
+        job_id = f"PRO-MP4-{os.urandom(4).hex()}"
         
         return {
             "success": True,
@@ -120,7 +127,7 @@ async def generate_video(req: VideoRequest):
             "style": req.style,
             "duration_seconds": round(total_duration, 2),
             "video_url": f"data:video/mp4;base64,{video_base64}",
-            "status": "Multi-Scene MP4 Video Rendered Successfully"
+            "status": "Professional Neural Video Rendered Successfully"
         }
 
     except Exception as e:
