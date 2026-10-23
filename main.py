@@ -12,24 +12,19 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
-from moviepy import (
-    ImageClip,
-    AudioFileClip,
-    concatenate_videoclips,
-)
+from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
 
-APP_VERSION = "9.0"
+APP_VERSION = "9.1"
 OUTPUT_DIR = Path(tempfile.gettempdir()) / "ai_content_factory"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 WIDTH = 720
 HEIGHT = 1280
-VIDEO_SECONDS = 60
 FPS = 24
 
 app = FastAPI(
     title="AI Content Factory 3D Video Studio",
-    version=APP_VERSION,
+    version=APP_VERSION
 )
 
 app.add_middleware(
@@ -37,13 +32,13 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
 
 app.mount(
     "/downloads",
     StaticFiles(directory=str(OUTPUT_DIR)),
-    name="downloads",
+    name="downloads"
 )
 
 
@@ -51,22 +46,22 @@ class ContentRequest(BaseModel):
     topic: str = Field(min_length=1, max_length=250)
     niche: str = Field(default="General", max_length=150)
     language: str = "hi"
-    script: str = Field(default="", max_length=12000)
+    script: str = Field(default="", max_length=4500)
     duration: int = Field(default=60, ge=10, le=60)
 
 
-def find_font():
+def load_font(size):
     candidates = [
         "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansDevanagariUI-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"
     ]
 
-    for font_path in candidates:
-        if os.path.exists(font_path):
+    for path in candidates:
+        if os.path.exists(path):
             try:
-                return ImageFont.truetype(font_path, 38)
+                return ImageFont.truetype(path, size)
             except Exception:
                 pass
 
@@ -79,7 +74,7 @@ def wrap_text(draw, text, font, max_width):
     current = ""
 
     for word in words:
-        candidate = f"{current} {word}".strip()
+        candidate = (current + " " + word).strip()
         box = draw.textbbox((0, 0), candidate, font=font)
 
         if box[2] - box[0] <= max_width:
@@ -96,86 +91,94 @@ def wrap_text(draw, text, font, max_width):
 
 
 def make_scene(topic, narration, scene_number, total_scenes):
-    # Create a cinematic, layered 3D-look graphic scene.
     image = Image.new("RGB", (WIDTH, HEIGHT), (12, 15, 38))
     draw = ImageDraw.Draw(image)
 
-    # Layered atmospheric backgrounds and glowing circles.
-    for i in range(18):
-        inset = i * 24
-        color = (
-            max(12, 40 - i),
-            max(12, 35 - i),
-            max(35, 95 - i * 3),
-        )
+    # Layered 3D-look frames. Coordinates stay inside the canvas.
+    for i in range(15):
+        inset = i * 20
+        x0 = min(inset, WIDTH // 2 - 2)
+        y0 = min(inset, HEIGHT // 2 - 2)
+        x1 = max(x0 + 1, WIDTH - inset)
+        y1 = max(y0 + 1, HEIGHT - inset)
+
         draw.rounded_rectangle(
-            (inset, inset, WIDTH - inset, HEIGHT - inset),
-            radius=40,
-            outline=color,
-            width=4,
+            (x0, y0, x1, y1),
+            radius=25,
+            outline=(
+                min(255, 35 + i * 7),
+                min(255, 40 + i * 4),
+                min(255, 100 + i * 5)
+            ),
+            width=3
         )
 
-    draw.ellipse((430, 110, 650, 330), fill=(75, 40, 130))
-    draw.ellipse((465, 145, 615, 295), fill=(110, 65, 175))
-    draw.ellipse((35, 760, 260, 985), fill=(35, 75, 135))
+    draw.ellipse((455, 115, 645, 305), fill=(75, 40, 130))
+    draw.ellipse((485, 145, 615, 275), fill=(110, 65, 175))
+    draw.ellipse((35, 900, 220, 1085), fill=(35, 75, 135))
 
-    font = find_font()
-    small_font = ImageFont.truetype(
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22
-    ) if os.path.exists(
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    ) else ImageFont.load_default()
+    small_font = load_font(20)
+    title_font = load_font(42)
+    subtitle_font = load_font(27)
 
     draw.text(
-        (45, 48),
-        "AI CONTENT FACTORY  |  3D STORY",
+        (38, 45),
+        "AI CONTENT FACTORY",
         font=small_font,
-        fill=(190, 210, 255),
+        fill=(190, 210, 255)
     )
 
     draw.rounded_rectangle(
-        (35, 350, WIDTH - 35, 900),
-        radius=35,
+        (32, 340, WIDTH - 32, 920),
+        radius=32,
         fill=(23, 28, 65),
         outline=(120, 100, 210),
-        width=4,
+        width=4
     )
 
-    title = topic.strip()
-    title_lines = wrap_text(draw, title, font, WIDTH - 130)
+    title_lines = wrap_text(draw, topic, title_font, WIDTH - 115)
+    y = 415
 
-    y = 420
     for line in title_lines[:5]:
-        draw.text((65, y), line, font=font, fill=(255, 225, 150))
-        y += 60
+        draw.text(
+            (58, y),
+            line,
+            font=title_font,
+            fill=(255, 225, 150)
+        )
+        y += 62
 
-    draw.line((65, 750, WIDTH - 65, 750), fill=(100, 145, 240), width=3)
+    draw.line(
+        (58, 745, WIDTH - 58, 745),
+        fill=(100, 145, 240),
+        width=3
+    )
 
-    subtitle_font = ImageFont.truetype(
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 25
-    ) if os.path.exists(
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    ) else ImageFont.load_default()
+    subtitle_lines = wrap_text(
+        draw, narration, subtitle_font, WIDTH - 115
+    )
 
-    lines = wrap_text(draw, narration, subtitle_font, WIDTH - 120)
     y = 785
-
-    for line in lines[:3]:
-        draw.text((60, y), line, font=subtitle_font, fill=(245, 245, 255))
-        y += 38
+    for line in subtitle_lines[:3]:
+        draw.text(
+            (58, y),
+            line,
+            font=subtitle_font,
+            fill=(245, 245, 255)
+        )
+        y += 42
 
     draw.text(
-        (45, HEIGHT - 75),
+        (38, HEIGHT - 70),
         f"SCENE {scene_number}/{total_scenes}",
         font=small_font,
-        fill=(190, 210, 255),
+        fill=(190, 210, 255)
     )
 
     return image
 
 
 def split_script(script, count=6):
-    # Split by sentences first, then distribute sentences across scenes.
     sentences = re.split(r"(?<=[।!?])\s+", script.strip())
     sentences = [s.strip() for s in sentences if s.strip()]
 
@@ -185,12 +188,15 @@ def split_script(script, count=6):
     groups = [[] for _ in range(count)]
 
     for i, sentence in enumerate(sentences):
-        groups[min(i * count // len(sentences), count - 1)].append(sentence)
+        index = min(i * count // len(sentences), count - 1)
+        groups[index].append(sentence)
 
-    result = []
-    for group in groups:
-        text = " ".join(group).strip()
-        result.append(text or script.strip())
+    result = [" ".join(group).strip() for group in groups]
+
+    # Keep empty scenes meaningful if the script is very short.
+    for i in range(len(result)):
+        if not result[i]:
+            result[i] = script.strip()
 
     return result
 
@@ -200,76 +206,75 @@ def health_check():
     return {
         "status": "Online",
         "engine": "AI Content Factory 3D Video Studio",
-        "version": APP_VERSION,
+        "version": APP_VERSION
     }
 
 
 @app.post("/generate-video")
 def generate_content(req: ContentRequest):
-    job_id = f"JOB-{uuid.uuid4().hex[:10].upper()}"
+    job_id = "JOB-" + uuid.uuid4().hex[:10].upper()
     work_dir = OUTPUT_DIR / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
 
     audio_path = work_dir / "narration.mp3"
+    audio_download_path = OUTPUT_DIR / f"{job_id}.mp3"
     video_path = OUTPUT_DIR / f"{job_id}.mp4"
 
     audio_clip = None
     scene_clips = []
+    video_clip = None
 
     try:
         topic = req.topic.strip()
-        if not topic:
-            raise HTTPException(status_code=400, detail="Topic is required.")
-
         script = req.script.strip()
 
-        # Never pretend a topic-only generic narration is the full script.
+        if not topic:
+            raise HTTPException(
+                status_code=400,
+                detail="Topic is required."
+            )
+
         if not script:
-            script = (
-                f"{topic}। यह कहानी हमें जीवन की एक महत्वपूर्ण सीख देती है। "
-                "कठिन समय में भी उम्मीद नहीं छोड़नी चाहिए। "
-                "अपने रिश्तों की कद्र करें और दूसरों के दर्द को समझें। "
-                "कभी-कभी एक छोटा सा अच्छा काम किसी की पूरी जिंदगी बदल सकता है। "
-                "अगर यह कहानी आपके दिल को छू गई, तो इसे दूसरों के साथ जरूर साझा करें।"
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Script is required. Generate the story in the app "
+                    "and send it in the script field."
+                )
             )
 
         if req.language != "hi":
             raise HTTPException(
                 status_code=400,
-                detail="This version currently supports Hindi narration only. Use language='hi'.",
+                detail="This version supports Hindi narration only."
             )
 
-        # Generate actual speech from the supplied script.
-        tts = gTTS(text=script, lang="hi", slow=False)
-        tts.save(str(audio_path))
+        # Generate Hindi narration from the supplied complete script.
+        gTTS(text=script, lang="hi", slow=False).save(str(audio_path))
 
         audio_clip = AudioFileClip(str(audio_path))
         audio_duration = audio_clip.duration
-
         target_duration = float(req.duration)
 
-        # Do not silently cut off the user's narration.
-        if audio_duration > target_duration + 0.5:
+        if audio_duration > target_duration:
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"Script narration is {audio_duration:.1f} seconds, "
-                    f"longer than the selected {req.duration}-second video. "
-                    "Please shorten the script and try again."
-                ),
+                    f"Your narration is {audio_duration:.1f} seconds long, "
+                    f"but the selected video is {req.duration} seconds. "
+                    "Shorten the script and retry."
+                )
             )
 
-        # If narration is shorter than 60 seconds, the final scene holds
-        # until the target duration. The narration itself is not altered.
-        scenes = split_script(script, count=6)
-        scene_duration = target_duration / len(scenes)
+        scene_texts = split_script(script, 6)
+        scene_duration = target_duration / len(scene_texts)
 
-        for index, narration_part in enumerate(scenes, start=1):
+        for index, narration_part in enumerate(scene_texts, start=1):
             image = make_scene(
                 topic=topic,
                 narration=narration_part,
                 scene_number=index,
-                total_scenes=len(scenes),
+                total_scenes=len(scene_texts)
             )
 
             image_path = work_dir / f"scene_{index}.jpg"
@@ -278,41 +283,33 @@ def generate_content(req: ContentRequest):
             clip = ImageClip(str(image_path)).with_duration(scene_duration)
             scene_clips.append(clip)
 
-        video = concatenate_videoclips(scene_clips, method="compose")
+        video_clip = concatenate_videoclips(
+            scene_clips,
+            method="compose"
+        )
 
-        # Audio is placed on the rendered MP4.
-        # The video remains 60 seconds, even if speech is shorter.
-        video = video.with_audio(audio_clip)
+        # Add the generated narration to the actual MP4.
+        video_clip = video_clip.with_audio(audio_clip)
 
-        video.write_videofile(
+        video_clip.write_videofile(
             str(video_path),
             fps=FPS,
             codec="libx264",
             audio_codec="aac",
             preset="ultrafast",
             threads=2,
-            logger=None,
+            logger=None
         )
 
-        video.close()
-        audio_clip.close()
-        audio_clip = None
-
-        for clip in scene_clips:
-            clip.close()
-        scene_clips = []
-
         if not video_path.exists() or video_path.stat().st_size == 0:
-            raise RuntimeError("MP4 file was not created.")
+            raise RuntimeError("The MP4 file was not created.")
+
+        shutil.copy2(audio_path, audio_download_path)
 
         base_url = os.getenv(
             "PUBLIC_BASE_URL",
-            "https://ai-content-backend-kgew.onrender.com",
+            "https://ai-content-backend-kgew.onrender.com"
         ).rstrip("/")
-
-        # Separate real MP4 and MP3 download URLs.
-        audio_download_path = OUTPUT_DIR / f"{job_id}.mp3"
-        shutil.copy2(audio_path, audio_download_path)
 
         return {
             "success": True,
@@ -327,12 +324,12 @@ def generate_content(req: ContentRequest):
             "storyboard": [
                 {
                     "scene": i + 1,
-                    "visual": "3D-style layered graphic scene with motion-ready design",
-                    "narration": part,
+                    "visual": "3D-style layered scene",
+                    "narration": part
                 }
-                for i, part in enumerate(scenes)
+                for i, part in enumerate(scene_texts)
             ],
-            "status": "MP4 rendered successfully",
+            "status": "MP4 rendered successfully"
         }
 
     except HTTPException:
@@ -340,9 +337,15 @@ def generate_content(req: ContentRequest):
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Video generation failed: {str(exc)}",
+            detail=f"Video generation failed: {str(exc)}"
         )
     finally:
+        if video_clip is not None:
+            try:
+                video_clip.close()
+            except Exception:
+                pass
+
         if audio_clip is not None:
             try:
                 audio_clip.close()
