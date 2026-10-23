@@ -1,6 +1,7 @@
 import os
 import tempfile
 import base64
+import re
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -8,7 +9,7 @@ import requests
 from gtts import gTTS
 from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips, ColorClip
 
-app = FastAPI(title="AI Content Factory Autonomous Video Studio v4.3", version="4.3")
+app = FastAPI(title="AI Content Factory Autonomous Video Studio v4.4", version="4.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,30 +21,35 @@ app.add_middleware(
 
 class VideoRequest(BaseModel):
     topic: str
-    niche: str = "Emotional Stories"
+    niche: str = "General"
     style: str = "3D Animation"
     language: str = "hi"
 
 @app.get("/")
 def health_check():
-    return {"status": "Online", "engine": "Autonomous Cloud Video Rendering Engine v4.3"}
+    return {"status": "Online", "engine": "Autonomous Cloud Video Rendering Engine v4.4"}
 
 @app.post("/generate-video")
 async def generate_video(req: VideoRequest):
     temp_files = []
     try:
-        topic = req.topic.strip()
-        if not topic:
+        raw_topic = req.topic.strip()
+        if not raw_topic:
             raise HTTPException(status_code=400, detail="Topic is required.")
         
+        # Clean topic from emojis and special symbols to prevent TTS/backend crashes
+        clean_topic = re.sub(r'[^\w\s\u0900-\u097F]', '', raw_topic).strip()
+        if not clean_topic:
+            clean_topic = "Important Life Lesson"
+        
         narration_text = (
-            f"Namaskar doston. Aaj ka hamara vishesh vishay hai: {topic}. "
+            f"Namaskar doston. Aaj ka hamara vishesh vishay hai: {clean_topic}. "
             f"Is kahani ke madhyam se hum yeh jaanenge ki kaise hamare jeevan mein "
-            f"chote-chote badlav aur rishte sabse bade maayne rakhte hain. "
+            f"chote-chote badlav aur mahatvapurna vichar sabse bade maayne rakhte hain. "
             f"Kripya is safar mein ant tak bane rahiye."
         )
         
-        # 1. Generate Audio using gTTS
+        # 1. Generate Audio using gTTS safely
         tts = gTTS(text=narration_text, lang=req.language, slow=False)
         audio_fd, audio_path = tempfile.mkstemp(suffix=".mp3")
         os.close(audio_fd)
@@ -63,11 +69,11 @@ async def generate_video(req: VideoRequest):
         image_clips = []
         
         for idx, p in enumerate(visual_prompts):
-            img_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(p)}?width=1080&height=1920&nologo=true&seed={1600+idx}"
+            img_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(p)}?width=1080&height=1920&nologo=true&seed={1700+idx}"
             
             image_added = False
             try:
-                img_response = requests.get(img_url, timeout=15)
+                img_response = requests.get(img_url, timeout=12)
                 if img_response.status_code == 200:
                     img_fd, img_path = tempfile.mkstemp(suffix=".jpg")
                     os.close(img_fd)
@@ -81,12 +87,10 @@ async def generate_video(req: VideoRequest):
             except Exception:
                 pass
             
-            # Fallback if image download fails: Create a cinematic dark blue background clip
             if not image_added:
                 fallback_clip = ColorClip(size=(1080, 1920), color=[15, 23, 42]).set_duration(clip_duration)
                 image_clips.append(fallback_clip)
                 
-        # Stitch Video Sequence
         video_sequence = concatenate_videoclips(image_clips, method="compose")
         final_video = video_sequence.set_audio(audio_clip)
         
@@ -115,7 +119,7 @@ async def generate_video(req: VideoRequest):
         return {
             "success": True,
             "job_id": job_id,
-            "topic": topic,
+            "topic": raw_topic,
             "style": req.style,
             "duration_seconds": round(total_duration, 2),
             "video_url": f"data:video/mp4;base64,{video_base64}",
