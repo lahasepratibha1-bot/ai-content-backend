@@ -8,7 +8,7 @@ import requests
 from gtts import gTTS
 from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
 
-app = FastAPI(title="AI Content Factory Autonomous Video Studio v3.8", version="3.8")
+app = FastAPI(title="AI Content Factory Autonomous Video Studio v3.9", version="3.9")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,7 +26,7 @@ class VideoRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "Online", "engine": "Autonomous Cloud Video Rendering Engine v3.8"}
+    return {"status": "Online", "engine": "Autonomous Cloud Video Rendering Engine v3.9"}
 
 @app.post("/generate-video")
 async def generate_video(req: VideoRequest):
@@ -36,11 +36,11 @@ async def generate_video(req: VideoRequest):
         if not topic:
             raise HTTPException(status_code=400, detail="Topic is required.")
         
-        # Dynamic Multi-Scene Narration Script based on user topic
+        # Dynamic Narration Script in Hindi
         narration_text = (
             f"Namaskar doston. Aaj ka hamara vishesh vishay hai: {topic}. "
             f"Is kahani ke madhyam se hum yeh jaanenge ki kaise hamare jeevan mein "
-            f"chote-chote badlav bade anubhav aur gehari seekh dekar jaate hain. "
+            f"chote-chote badlav aur rishte sabse bade maayne rakhte hain. "
             f"Kripya is safar mein ant tak bane rahiye."
         )
         
@@ -54,35 +54,39 @@ async def generate_video(req: VideoRequest):
         audio_clip = AudioFileClip(audio_path)
         total_duration = audio_clip.duration
         
-        # 2. Generate Multiple 3D Visual Assets (Images) for different scenes
-        prompts = [
-            f"{topic} 3d pixar style cute character emotional expression cinematic lighting",
-            f"{topic} dramatic scene 3d animation digital art masterpiece",
-            f"{topic} touching moment emotional storytelling 3d render vibrant colors"
+        # 2. Safe English 3D Visual Prompts (Avoids emoji/script crash on image generator)
+        visual_prompts = [
+            "cute 3d pixar style character emotional storytelling cinematic lighting masterpiece",
+            "touching emotional dramatic scene 3d animation vibrant colors high detail",
+            "heartwarming family moment 3d render digital art cinematic atmosphere"
         ]
         
-        clip_duration = max(2.0, total_duration / len(prompts))
+        clip_duration = max(2.0, total_duration / len(visual_prompts))
         image_clips = []
         
-        for idx, p in enumerate(prompts):
-            img_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(p)}?width=1080&height=1920&nologo=true&seed={950+idx}"
+        for idx, p in enumerate(visual_prompts):
+            img_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(p)}?width=1080&height=1920&nologo=true&seed={1200+idx}"
             
-            img_response = requests.get(img_url, timeout=15)
-            if img_response.status_code == 200:
-                img_fd, img_path = tempfile.mkstemp(suffix=".jpg")
-                os.close(img_fd)
-                with open(img_path, "wb") as f:
-                    f.write(img_response.content)
-                temp_files.append(img_path)
+            try:
+                img_response = requests.get(img_url, timeout=20)
+                if img_response.status_code == 200:
+                    img_fd, img_path = tempfile.mkstemp(suffix=".jpg")
+                    os.close(img_fd)
+                    with open(img_path, "wb") as f:
+                        f.write(img_response.content)
+                    temp_files.append(img_path)
+                    
+                    img_clip = ImageClip(img_path).set_duration(clip_duration)
+                    image_clips.append(img_clip)
+            except Exception:
+                pass
                 
-                img_clip = ImageClip(img_path).set_duration(clip_duration)
-                image_clips.append(img_clip)
-                
+        # Fallback if image generation fails
         if not image_clips:
             audio_clip.close()
-            raise HTTPException(status_code=500, detail="Failed to generate visual assets.")
+            raise HTTPException(status_code=500, detail="Failed to generate visual assets from cloud AI generator.")
             
-        # 3. Stitch Multiple Scene Images & Audio together into final MP4 video
+        # 3. Stitch Images & Audio into final MP4 video
         video_sequence = concatenate_videoclips(image_clips, method="compose")
         final_video = video_sequence.set_audio(audio_clip)
         
@@ -102,7 +106,7 @@ async def generate_video(req: VideoRequest):
         audio_clip.close()
         final_video.close()
         
-        # 4. Encode MP4 video to Base64 so frontend/GAS can handle it smoothly via JSON
+        # 4. Encode to Base64 for smooth frontend rendering
         with open(vid_path, "rb") as video_file:
             video_bytes = video_file.read()
             video_base64 = base64.b64encode(video_bytes).decode('utf-8')
