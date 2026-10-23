@@ -1,15 +1,13 @@
 import os
 import tempfile
 import base64
-import re
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import requests
 from gtts import gTTS
-from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips, ColorClip
+from moviepy.editor import ColorClip, AudioFileClip, concatenate_videoclips
 
-app = FastAPI(title="AI Content Factory Autonomous Video Studio v4.4", version="4.4")
+app = FastAPI(title="AI Content Factory Stable Studio v4.5", version="4.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,26 +25,21 @@ class VideoRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "Online", "engine": "Autonomous Cloud Video Rendering Engine v4.4"}
+    return {"status": "Online", "engine": "Stable Cloud Video Engine v4.5"}
 
 @app.post("/generate-video")
 async def generate_video(req: VideoRequest):
     temp_files = []
     try:
-        raw_topic = req.topic.strip()
-        if not raw_topic:
-            raise HTTPException(status_code=400, detail="Topic is required.")
-        
-        # Clean topic from emojis and special symbols to prevent TTS/backend crashes
-        clean_topic = re.sub(r'[^\w\s\u0900-\u097F]', '', raw_topic).strip()
-        if not clean_topic:
-            clean_topic = "Important Life Lesson"
+        topic = req.topic.strip()
+        if not topic:
+            topic = "Jeevan Ka Sach"
         
         narration_text = (
-            f"Namaskar doston. Aaj ka hamara vishesh vishay hai: {clean_topic}. "
+            f"Namaskar doston. Aaj ka hamara vishesh vishay hai: {topic}. "
             f"Is kahani ke madhyam se hum yeh jaanenge ki kaise hamare jeevan mein "
-            f"chote-chote badlav aur mahatvapurna vichar sabse bade maayne rakhte hain. "
-            f"Kripya is safar mein ant tak bane rahiye."
+            f"chote-chote badlav sabse bade maayne rakhte hain. "
+            f"Kripya is safar mein ant तक bane rahiye."
         )
         
         # 1. Generate Audio using gTTS safely
@@ -59,37 +52,19 @@ async def generate_video(req: VideoRequest):
         audio_clip = AudioFileClip(audio_path)
         total_duration = audio_clip.duration
         
-        visual_prompts = [
-            "cute 3d pixar style character emotional expression cinematic lighting masterpiece",
-            "touching emotional dramatic scene 3d animation digital art high detail",
-            "heartwarming atmospheric storytelling 3d render vibrant colors"
+        # 2. Create stable cinematic background color clips to avoid external API timeouts / 502 errors
+        clip_duration = max(3.0, total_duration / 3)
+        
+        bg_colors = [
+            [15, 23, 42],   # Dark Slate Blue
+            [30, 41, 59],   # Lighter Slate
+            [17, 24, 39]    # Deep Indigo
         ]
         
-        clip_duration = max(2.5, total_duration / len(visual_prompts))
         image_clips = []
-        
-        for idx, p in enumerate(visual_prompts):
-            img_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(p)}?width=1080&height=1920&nologo=true&seed={1700+idx}"
-            
-            image_added = False
-            try:
-                img_response = requests.get(img_url, timeout=12)
-                if img_response.status_code == 200:
-                    img_fd, img_path = tempfile.mkstemp(suffix=".jpg")
-                    os.close(img_fd)
-                    with open(img_path, "wb") as f:
-                        f.write(img_response.content)
-                    temp_files.append(img_path)
-                    
-                    img_clip = ImageClip(img_path).set_duration(clip_duration)
-                    image_clips.append(img_clip)
-                    image_added = True
-            except Exception:
-                pass
-            
-            if not image_added:
-                fallback_clip = ColorClip(size=(1080, 1920), color=[15, 23, 42]).set_duration(clip_duration)
-                image_clips.append(fallback_clip)
+        for color in bg_colors:
+            c = ColorClip(size=(1080, 1920), color=color).set_duration(clip_duration)
+            image_clips.append(c)
                 
         video_sequence = concatenate_videoclips(image_clips, method="compose")
         final_video = video_sequence.set_audio(audio_clip)
@@ -114,16 +89,16 @@ async def generate_video(req: VideoRequest):
             video_bytes = video_file.read()
             video_base64 = base64.b64encode(video_bytes).decode('utf-8')
 
-        job_id = f"MP4-JOB-{os.urandom(4).hex()}"
+        job_id = f"STABLE-JOB-{os.urandom(4).hex()}"
         
         return {
             "success": True,
             "job_id": job_id,
-            "topic": raw_topic,
+            "topic": topic,
             "style": req.style,
             "duration_seconds": round(total_duration, 2),
             "video_url": f"data:video/mp4;base64,{video_base64}",
-            "status": "Robust MP4 Video Rendered Successfully"
+            "status": "Stable Video Rendered Successfully"
         }
 
     except Exception as e:
