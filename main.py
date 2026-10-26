@@ -2,6 +2,10 @@ import os
 import re
 import uuid
 import shutil
+import time
+import json
+import urllib.request
+import urllib.error
 import threading
 import tempfile
 from pathlib import Path
@@ -13,9 +17,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
-from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
+from moviepy import ImageClip, AudioFileClip, VideoFileClip, concatenate_videoclips
 
-APP_VERSION = "10.0"
+APP_VERSION = "11.0-runway"
 OUTPUT_DIR = Path(tempfile.gettempdir()) / "ai_content_factory"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -48,6 +52,8 @@ class ContentRequest(BaseModel):
     script: str = Field(min_length=1, max_length=MAX_SCRIPT_CHARS)
     # None means use the full generated narration length.
     duration: int | None = Field(default=None, ge=1, le=MAX_VIDEO_SECONDS)
+    # slideshow keeps the existing free renderer; realistic/3d/auto use Runway API.
+    mode: str = Field(default="slideshow", pattern="^(slideshow|realistic|3d|auto)$")
 
 
 def load_font(size):
@@ -140,6 +146,115 @@ def update_job(job_id, **values):
         if job_id in JOBS:
             JOBS[job_id].update(values)
             JOBS[job_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def runway_request(path, payload=None, method="GET"):
+    """Small standard-library Runway API client; API key stays on the server."""
+    api_key = os.getenv("RUNWAY_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("RUNWAY_API_KEY is not set in Render Environment. Add it there, then redeploy.")
+    url = "https://api.dev.runwayml.com" + path
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"Authorization": f"Bearer {api_key}",
+                 "X-Runway-Version": "2024-11-06",
+                 "Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1000]
+        if exc.code in (401, 403):
+            raise RuntimeError("Runway API key is invalid or does not have access. Check RUNWAY_API_KEY and API credits.") from exc
+        if exc.code == 429:
+            raise RuntimeError("Runway API rate limit or credits/quota reached. Check Runway API billing/credits.") from exc
+        raise RuntimeError(f"Runway API error HTTP {exc.code}: {detail}") from exc
+
+
+def create_runway_video(topic, script, mode, work_dir, update):
+    """Generate one short real AI motion clip with Runway Gen-4.5."""
+    if mode == "3d":
+        style = "high quality 3D animated movie, expressive stylized characters, cinematic lighting, smooth character motion"
+    elif mode == "realistic":
+        style = "photorealistic live-action movie scene, natural human actors, cinematic camera movement, realistic lighting"
+    else:
+        style = "cinematic short film, visually rich characters, natural movement, polished movie lighting"
+    prompt = (f"{style}. Scene inspired by this story topic: {topic}. "
+              f"Visual context: {script[:700]}. Vertical 9:16 composition, no text, no subtitles, no logos.")
+    update(progress=12, message="Sending prompt to Runway AI video generator")
+    task = runway_request("/v1/text_to_video", {
+        "model": "gen4.5",
+        "promptText": prompt,
+        "ratio": "720:1280",
+        "duration": 5
+    }, method="POST")
+    task_id = task.get("id")
+    if not task_id:
+        raise RuntimeError("Runway did not return a task ID: " + json.dumps(task)[:700])
+    update(progress=20, message="Runway is generating the moving video scene", runway_task_id=task_id)
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        time.sleep(5)
+        status_data = runway_request(f"/v1/tasks/{task_id}")
+        status = str(status_data.get("status", "")).lower()
+        if status == "succeeded":
+            output = status_data.get("output")
+            if isinstance(output, list) and output:
+                video_url = output[0]
+            elif isinstance(output, str):
+                video_url = output
+            else:
+                raise RuntimeError("Runway task succeeded but no video URL was returned.")
+            update(progress=72, message="Downloading generated AI motion video")
+            clip_path = work_dir / "runway_scene.mp4"
+            req = urllib.request.Request(video_url, headers={"User-Agent": "AI-Content-Factory/11.0"})
+            with urllib.request.urlopen(req, timeout=120) as response, open(clip_path, "wb") as out:
+                shutil.copyfileobj(response, out)
+            if not clip_path.exists() or clip_path.stat().st_size < 1000:
+                raise RuntimeError("Runway video download was empty or incomplete.")
+            return clip_path
+        if status in ("failed", "cancelled", "canceled", "throttled"):
+            raise RuntimeError("Runway video task " + status + ": " + str(status_data.get("failure", status_data.get("error", "No details")))[:700])
+        update(progress=35, message="Runway AI video generation in progress")
+    raise RuntimeError("Runway video generation timed out after 10 minutes. Check Runway task dashboard.")
+
+
+def render_runway_job(job_id, topic, script, language, mode):
+    work_dir = OUTPUT_DIR / (job_id + "_work")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = work_dir / "narration.mp3"
+    video_path = OUTPUT_DIR / f"{job_id}.mp4"
+    audio_clip = video_clip = final_clip = None
+    try:
+        update_job(job_id, status="processing", progress=5, message="Preparing Hindi narration")
+        gTTS(text=script, lang=language, slow=False).save(str(audio_path))
+        audio_clip = AudioFileClip(str(audio_path))
+        ai_clip_path = create_runway_video(topic, script, mode, work_dir,
+            lambda **kw: update_job(job_id, **kw))
+        video_clip = VideoFileClip(str(ai_clip_path), audio=False)
+        # Repeat the short AI-generated moving scene to cover narration duration.
+        from moviepy import vfx
+        target_duration = max(float(audio_clip.duration or 0), 5.0)
+        video_clip = video_clip.with_effects([vfx.Loop(duration=target_duration)]).with_duration(target_duration)
+        final_clip = video_clip.with_audio(audio_clip.with_duration(target_duration))
+        update_job(job_id, progress=82, message="Combining AI motion video with Hindi narration")
+        final_clip.write_videofile(str(video_path), fps=24, codec="libx264", audio_codec="aac",
+                                   preset="ultrafast", threads=2, logger=None)
+        base_url = os.getenv("PUBLIC_BASE_URL", "https://ai-content-backend-kgew.onrender.com").rstrip("/")
+        update_job(job_id, status="completed", progress=100, message="AI-generated motion video with Hindi narration is ready",
+                   topic=topic, mode=mode, duration_seconds=round(target_duration, 1),
+                   video_url=f"{base_url}/downloads/{job_id}.mp4",
+                   video_type="runway_ai_motion", note="Generated AI motion clip is looped under narration when narration exceeds 5 seconds.")
+    except Exception as exc:
+        update_job(job_id, status="failed", progress=100, message=str(exc), error=str(exc))
+    finally:
+        for clip in (final_clip, video_clip, audio_clip):
+            if clip is not None:
+                try: clip.close()
+                except Exception: pass
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def render_job(job_id, topic, script, language, requested_duration):
@@ -254,6 +369,7 @@ def generate_content(req: ContentRequest):
             "success": True,
             "job_id": job_id,
             "topic": topic,
+            "mode": req.mode,
             "status": "queued",
             "progress": 0,
             "message": "Video job queued",
@@ -261,11 +377,15 @@ def generate_content(req: ContentRequest):
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    thread = threading.Thread(
-        target=render_job,
-        args=(job_id, topic, script, req.language, req.duration),
-        daemon=True,
-    )
+    if req.mode in ("realistic", "3d", "auto"):
+        if not os.getenv("RUNWAY_API_KEY", "").strip():
+            raise HTTPException(status_code=503, detail="Real AI video mode needs RUNWAY_API_KEY in Render Environment. The free slideshow mode still works without it.")
+        target = render_runway_job
+        args = (job_id, topic, script, req.language, req.mode)
+    else:
+        target = render_job
+        args = (job_id, topic, script, req.language, req.duration)
+    thread = threading.Thread(target=target, args=args, daemon=True)
     thread.start()
     return {"success": True, "job_id": job_id, "status": "queued", "message": "Video rendering started."}
 
