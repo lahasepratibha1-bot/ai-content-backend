@@ -1,7 +1,9 @@
+
 import os
 import uuid
 import sqlite3
 import subprocess
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 from threading import Thread
@@ -13,7 +15,13 @@ from pydantic import BaseModel, Field
 from gtts import gTTS
 import imageio_ffmpeg
 
-app = FastAPI(title="Personal AI Video Studio", version="1.2.0")
+from scene_engine import router as scene_router
+
+
+app = FastAPI(
+    title="Personal AI Video Studio",
+    version="1.3.0"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,7 +37,14 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 DB_PATH = BASE_DIR / "video_jobs.db"
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
-app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
+app.mount(
+    "/outputs",
+    StaticFiles(directory=str(OUTPUT_DIR)),
+    name="outputs"
+)
+
+# Connect AI Scene Engine
+app.include_router(scene_router)
 
 
 class AudioRequest(BaseModel):
@@ -74,23 +89,45 @@ def startup():
     init_db()
 
 
-def update_job(job_id, status, progress, video_url=None, error=None):
+def update_job(
+    job_id,
+    status,
+    progress,
+    video_url=None,
+    error=None
+):
     with db() as conn:
         conn.execute("""
             UPDATE video_jobs
             SET status=?, progress=?, video_url=?, error=?
             WHERE job_id=?
-        """, (status, progress, video_url, error, job_id))
+        """, (
+            status,
+            progress,
+            video_url,
+            error,
+            job_id
+        ))
 
 
-def render_video(job_id, script, language, video_format, resolution):
+def render_video(
+    job_id,
+    script,
+    language,
+    video_format,
+    resolution
+):
     audio_path = OUTPUT_DIR / f"{job_id}.mp3"
     video_path = OUTPUT_DIR / f"{job_id}.mp4"
 
     try:
         update_job(job_id, "processing", 10)
 
-        tts = gTTS(text=script, lang=language, slow=False)
+        tts = gTTS(
+            text=script,
+            lang=language,
+            slow=False
+        )
         tts.save(str(audio_path))
 
         update_job(job_id, "processing", 40)
@@ -106,21 +143,24 @@ def render_video(job_id, script, language, video_format, resolution):
 
         duration_result = subprocess.run(
             [
-                FFMPEG, "-i", str(audio_path),
+                FFMPEG,
+                "-i",
+                str(audio_path),
                 "-hide_banner"
             ],
             capture_output=True,
             text=True
         )
 
-        import re
         match = re.search(
             r"Duration: (\d+):(\d+):(\d+)\.(\d+)",
             duration_result.stderr
         )
 
         if not match:
-            raise RuntimeError("Could not read audio duration")
+            raise RuntimeError(
+                "Could not read audio duration"
+            )
 
         duration = (
             int(match.group(1)) * 3600
@@ -135,7 +175,8 @@ def render_video(job_id, script, language, video_format, resolution):
             FFMPEG,
             "-y",
             "-f", "lavfi",
-            "-i", f"color=c=black:s={width}x{height}:d={duration}",
+            "-i",
+            f"color=c=black:s={width}x{height}:d={duration}",
             "-i", str(audio_path),
             "-vf", "format=yuv420p",
             "-c:v", "libx264",
@@ -148,7 +189,11 @@ def render_video(job_id, script, language, video_format, resolution):
             str(video_path)
         ]
 
-        subprocess.run(command, check=True, capture_output=True)
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True
+        )
 
         update_job(
             job_id,
@@ -158,7 +203,12 @@ def render_video(job_id, script, language, video_format, resolution):
         )
 
     except Exception as exc:
-        update_job(job_id, "failed", 0, error=str(exc))
+        update_job(
+            job_id,
+            "failed",
+            0,
+            error=str(exc)
+        )
 
     finally:
         if audio_path.exists():
@@ -171,7 +221,7 @@ def home():
         "success": True,
         "engine": "Personal AI Video Studio",
         "status": "online",
-        "version": "1.2.0"
+        "version": "1.3.0"
     }
 
 
@@ -182,13 +232,22 @@ def health():
 
 @app.post("/api/generate-audio")
 def generate_audio(data: AudioRequest):
+
     if data.language not in ["hi", "mr", "en"]:
-        raise HTTPException(400, "Supported languages: hi, mr, en")
+        raise HTTPException(
+            status_code=400,
+            detail="Supported languages: hi, mr, en"
+        )
 
     try:
         filename = f"{uuid.uuid4().hex}.mp3"
-        path = OUTPUT_DIR / filename
-        gTTS(text=data.script, lang=data.language).save(str(path))
+        audio_path = OUTPUT_DIR / filename
+
+        gTTS(
+            text=data.script,
+            lang=data.language,
+            slow=False
+        ).save(str(audio_path))
 
         return {
             "success": True,
@@ -196,40 +255,67 @@ def generate_audio(data: AudioRequest):
             "audio_url": f"/outputs/{filename}",
             "download_url": f"/outputs/{filename}"
         }
+
     except Exception as exc:
-        raise HTTPException(500, str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
 
 
 @app.post("/api/video/jobs")
 def create_video_job(data: VideoJobRequest):
+
     if data.language not in ["hi", "mr", "en"]:
-        raise HTTPException(400, "Supported languages: hi, mr, en")
+        raise HTTPException(
+            status_code=400,
+            detail="Supported languages: hi, mr, en"
+        )
 
     if data.video_format not in ["shorts", "landscape"]:
-        raise HTTPException(400, "Format must be shorts or landscape")
+        raise HTTPException(
+            status_code=400,
+            detail="Format must be shorts or landscape"
+        )
 
     if data.resolution not in ["720p", "1080p"]:
-        raise HTTPException(400, "Resolution must be 720p or 1080p")
+        raise HTTPException(
+            status_code=400,
+            detail="Resolution must be 720p or 1080p"
+        )
 
     job_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
 
     with db() as conn:
         conn.execute("""
-            INSERT INTO video_jobs
-            (job_id, status, progress, script, language,
-             video_format, resolution, video_url, error, created_at)
+            INSERT INTO video_jobs (
+                job_id, status, progress, script,
+                language, video_format, resolution,
+                video_url, error, created_at
+            )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            job_id, "queued", 0, data.script, data.language,
-            data.video_format, data.resolution, None, None, created_at
+            job_id,
+            "queued",
+            0,
+            data.script,
+            data.language,
+            data.video_format,
+            data.resolution,
+            None,
+            None,
+            created_at
         ))
 
     Thread(
         target=render_video,
         args=(
-            job_id, data.script, data.language,
-            data.video_format, data.resolution
+            job_id,
+            data.script,
+            data.language,
+            data.video_format,
+            data.resolution
         ),
         daemon=True
     ).start()
@@ -244,6 +330,7 @@ def create_video_job(data: VideoJobRequest):
 
 @app.get("/api/video/jobs/{job_id}")
 def get_video_job(job_id: str):
+
     with db() as conn:
         row = conn.execute(
             "SELECT * FROM video_jobs WHERE job_id=?",
@@ -251,13 +338,20 @@ def get_video_job(job_id: str):
         ).fetchone()
 
     if not row:
-        raise HTTPException(404, "Video job not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Video job not found"
+        )
 
-    return {"success": True, "job": dict(row)}
+    return {
+        "success": True,
+        "job": dict(row)
+    }
 
 
 @app.get("/api/video/jobs")
 def get_all_video_jobs():
+
     with db() as conn:
         rows = conn.execute(
             "SELECT * FROM video_jobs ORDER BY created_at DESC"
