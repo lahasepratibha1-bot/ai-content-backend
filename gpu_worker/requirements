@@ -7,4 +7,3 @@ transformers
 accelerate
 safetensors
 Pillow
-runpod~=1.7.6
