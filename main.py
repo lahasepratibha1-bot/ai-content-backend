@@ -11,7 +11,7 @@ import imageio_ffmpeg
 from scene_engine import router as scene_router
 from image_engine import router as image_router
 
-app = FastAPI(title="Personal AI Video Studio", version="1.4.0")
+app = FastAPI(title="Personal AI Video Studio", version="2.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "outputs"
@@ -75,10 +75,10 @@ def render_video(job_id, script, language, video_format, resolution):
         if audio_path.exists(): audio_path.unlink()
 
 @app.get("/")
-def home(): return {"success": True, "engine": "Personal AI Video Studio", "status": "online", "version": "1.4.0"}
+def home(): return {"success": True, "engine": "Personal AI Video Studio", "status": "online", "version": "2.1.0"}
 
 @app.get("/api/health")
-def health(): return {"status": "healthy", "version": "1.4.0"}
+def health(): return {"status": "healthy", "version": "2.1.0"}
 
 @app.post("/api/generate-audio")
 def generate_audio(data: AudioRequest):
