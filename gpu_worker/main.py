@@ -74,4 +74,3 @@ def generate(data: GenerateRequest, authorization: Optional[str] = Header(defaul
                 "model": MODEL_ID}
     except Exception as exc:
         raise HTTPException(500, f"Generation error: {exc}")
-
