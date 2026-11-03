@@ -1,9 +1,8 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-pydantic==2.10.4
-torch
-diffusers==0.32.2
-transformers
-accelerate
-safetensors
-Pillow
+fastapi==0.110.0
+uvicorn==0.28.0
+pydantic==2.6.4
+requests==2.31.0
+ffmpeg-python==0.2.0
+gTTS==2.5.1
+Pillow==10.4.0
+imageio-ffmpeg==0.6.0
