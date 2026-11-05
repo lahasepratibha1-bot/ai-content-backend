@@ -1,4 +1,4 @@
-import os, uuid, sqlite3, subprocess, re
+import os, uuid, sqlite3, subprocess, re, asyncio
 from pathlib import Path
 from datetime import datetime, timezone
 from threading import Thread
@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from gtts import gTTS
+import edge_tts
 import imageio_ffmpeg
 from scene_engine import router as scene_router
 from image_engine import router as image_router
@@ -26,12 +27,54 @@ class AudioRequest(BaseModel):
     script: str = Field(min_length=1, max_length=10000)
     language: str = "hi"
     voice_speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    voice_gender: str = "female"
 
 class VideoJobRequest(BaseModel):
     script: str = Field(min_length=1, max_length=50000)
     language: str = "hi"
     video_format: str = "shorts"
     resolution: str = "720p"
+    voice_speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    voice_gender: str = "female"
+
+VOICE_MAP = {
+    "hi": {
+        "female": "hi-IN-SwaraNeural",
+        "male": "hi-IN-MadhurNeural",
+    },
+    "en": {
+        "female": "en-IN-NeerjaNeural",
+        "male": "en-IN-PrabhatNeural",
+    },
+}
+
+def make_speech(text, language, voice_gender, voice_speed, output_path):
+    """Prefer neural Edge voices; fall back to gTTS if the online service fails."""
+    gender = (voice_gender or "female").lower()
+    if gender not in ("female", "male"):
+        raise ValueError("voice_gender must be 'female' or 'male'")
+
+    voice = VOICE_MAP.get(language, {}).get(gender)
+    if voice:
+        # Convert 0.5–2.0 speed into Edge TTS's supported percentage range.
+        rate_percent = max(-50, min(50, round((voice_speed - 1.0) * 100)))
+        rate = f"{rate_percent:+d}%"
+        try:
+            asyncio.run(edge_tts.Communicate(text, voice, rate=rate).save(str(output_path)))
+            if output_path.exists() and output_path.stat().st_size > 1000:
+                return {"engine": "edge-tts", "voice": voice, "fallback_used": False}
+            raise RuntimeError("Edge TTS returned an empty audio file")
+        except Exception:
+            if output_path.exists():
+                output_path.unlink()
+
+    # gTTS remains as a compatibility fallback and for Marathi.
+    gTTS(text=text, lang=language, slow=False).save(str(output_path))
+    return {
+        "engine": "gTTS",
+        "voice": "default",
+        "fallback_used": bool(voice),
+    }
 
 def db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -51,11 +94,11 @@ def update_job(job_id, status, progress, video_url=None, error=None):
         conn.execute("UPDATE video_jobs SET status=?, progress=?, video_url=?, error=? WHERE job_id=?",
                      (status, progress, video_url, error, job_id))
 
-def render_video(job_id, script, language, video_format, resolution):
+def render_video(job_id, script, language, video_format, resolution, voice_gender="female", voice_speed=1.0):
     audio_path, video_path = OUTPUT_DIR / f"{job_id}.mp3", OUTPUT_DIR / f"{job_id}.mp4"
     try:
         update_job(job_id, "processing", 10)
-        gTTS(text=script, lang=language, slow=False).save(str(audio_path))
+        make_speech(script, language, voice_gender, voice_speed, audio_path)
         update_job(job_id, "processing", 40)
         width, height = (720, 1280) if video_format == "shorts" else (1280, 720)
         if resolution == "1080p": width, height = int(width*1.5), int(height*1.5)
@@ -82,22 +125,41 @@ def health(): return {"status": "healthy", "version": "2.1.0"}
 
 @app.post("/api/generate-audio")
 def generate_audio(data: AudioRequest):
-    if data.language not in ["hi", "mr", "en"]: raise HTTPException(400, "Supported languages: hi, mr, en")
+    if data.language not in ["hi", "mr", "en"]:
+        raise HTTPException(400, "Supported languages: hi, mr, en")
+    if data.voice_gender.lower() not in ["female", "male"]:
+        raise HTTPException(400, "voice_gender must be female or male")
     try:
-        name = f"{uuid.uuid4().hex}.mp3"; gTTS(text=data.script, lang=data.language, slow=False).save(str(OUTPUT_DIR/name))
-        return {"success": True, "language": data.language, "audio_url": f"/outputs/{name}", "download_url": f"/outputs/{name}"}
-    except Exception as exc: raise HTTPException(500, str(exc))
+        name = f"{uuid.uuid4().hex}.mp3"
+        result = make_speech(data.script, data.language, data.voice_gender, data.voice_speed, OUTPUT_DIR / name)
+        return {
+            "success": True,
+            "language": data.language,
+            "voice_gender": data.voice_gender.lower(),
+            "voice": result["voice"],
+            "engine": result["engine"],
+            "fallback_used": result["fallback_used"],
+            "audio_url": f"/outputs/{name}",
+            "download_url": f"/outputs/{name}",
+        }
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
 
 @app.post("/api/video/jobs")
 def create_video_job(data: VideoJobRequest):
     if data.language not in ["hi", "mr", "en"]: raise HTTPException(400, "Supported languages: hi, mr, en")
+    if data.voice_gender.lower() not in ["female", "male"]: raise HTTPException(400, "voice_gender must be female or male")
     if data.video_format not in ["shorts", "landscape"]: raise HTTPException(400, "Format must be shorts or landscape")
     if data.resolution not in ["720p", "1080p"]: raise HTTPException(400, "Resolution must be 720p or 1080p")
     jid, created = str(uuid.uuid4()), datetime.now(timezone.utc).isoformat()
     with db() as conn:
         conn.execute("INSERT INTO video_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                      (jid, "queued", 0, data.script, data.language, data.video_format, data.resolution, None, None, created))
-    Thread(target=render_video, args=(jid, data.script, data.language, data.video_format, data.resolution), daemon=True).start()
+    Thread(
+        target=render_video,
+        args=(jid, data.script, data.language, data.video_format, data.resolution, data.voice_gender.lower(), data.voice_speed),
+        daemon=True
+    ).start()
     return {"success": True, "job_id": jid, "status": "queued"}
 
 @app.get("/api/video/jobs/{job_id}")
