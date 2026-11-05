@@ -1,80 +1,147 @@
-import re, uuid
-from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+"""Backend client for the upgraded GPU worker's LTX text-to-video endpoint."""
+import base64
+import os
+from pathlib import Path
+from typing import Dict, Any
+import requests
+from fastapi import HTTPException
 
-router = APIRouter(prefix="/api/scenes", tags=["AI Scene Engine"])
-SCENE_JOBS = {}
+OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
+OUTPUT_DIR.mkdir(exist_ok=True)
+WORKER_URL = os.getenv("IMAGE_WORKER_URL", "").rstrip("/")
+WORKER_TOKEN = os.getenv("IMAGE_WORKER_TOKEN", "")
+TIMEOUT = int(os.getenv("VIDEO_WORKER_TIMEOUT", "900"))
 
-class SceneRequest(BaseModel):
-    script: str = Field(min_length=1, max_length=50000)
-    language: str = "hi"
-    video_format: str = "shorts"
-    character_description: str = ""
-    visual_style: str = "photorealistic Indian cinema still, cinematic natural lighting"
-    target_duration: int = Field(default=60, ge=5, le=3600)
 
-def split_sentences(script):
-    # Keep scene count manageable: combine very short sentences; split long lines by punctuation.
-    chunks = [x.strip() for x in re.split(r'(?<=[.!?।])\s+|\n+', script.strip()) if x.strip()]
-    scenes, current = [], ""
-    for chunk in chunks:
-        if len((current + " " + chunk).split()) <= 18 or not current:
-            current = (current + " " + chunk).strip()
-        else:
-            scenes.append(current); current = chunk
-    if current: scenes.append(current)
-    return scenes or [script.strip()]
+def _headers():
+    h = {"Content-Type": "application/json"}
+    if WORKER_TOKEN:
+        h["Authorization"] = f"Bearer {WORKER_TOKEN}"
+    return h
 
-def detect_emotion(t):
-    s=t.lower()
-    if any(x in s for x in ["खुशी के आंसू","खुशी के आँसू","खुशी","मुस्कुर","happy","smile"]): return "warm happiness"
-    if any(x in s for x in ["रोई","रोया","दुख","उदास","आंसू","आँसू","sad","cry"]): return "quiet sadness"
-    if any(x in s for x in ["गुस्सा","चिल्ला","नाराज","angry"]): return "restrained anger"
-    if any(x in s for x in ["प्यार","मां","माँ","बेटी","गले लगा","love","mother","daughter"]): return "tender affection"
-    return "natural everyday emotion"
 
-def detect_action(t):
-    s=t.lower()
-    rules=[("waking up",["उठी","उठा","जागी","जागा","उठती"]),("embracing",["गले लगा","लिपट","hug"]),("cooking",["खाना बनाती","खाना बनाता","बनाती","बनाता","cooking"]),("crying",["रोई","रोया","रोने","crying"]),("smiling",["मुस्कुर","हंसी","smile"]),("walking",["चलती","चला","गई","गया","walking"]),("speaking",["बोली","बोला","कहा","पूछा"])]
-    for action, words in rules:
-        if any(w in s for w in words): return action
-    return "a natural candid moment"
+def video_worker_health():
+    if not WORKER_URL:
+        return {"success": False, "configured": False,
+                "error": "IMAGE_WORKER_URL is not set. Configure the upgraded GPU worker URL."}
+    try:
+        r = requests.get(WORKER_URL + "/health", headers=_headers(), timeout=30)
+        r.raise_for_status()
+        body = r.json()
+        supported = bool(body.get("video_generation_supported"))
+        return {"success": supported, "configured": True, "worker": body,
+                "error": body.get("reason") if not supported else None}
+    except requests.RequestException as exc:
+        return {"success": False, "configured": True, "error": f"GPU worker health check failed: {exc}"}
 
-@router.post("/plan")
-def create_scene_plan(data: SceneRequest):
-    if data.language not in ["hi","mr","en"]: raise HTTPException(400,"Supported languages: hi, mr, en")
-    if data.video_format not in ["shorts","landscape"]: raise HTTPException(400,"Format must be shorts or landscape")
-    texts=split_sentences(data.script)
-    jid=str(uuid.uuid4()); scenes=[]
-    ratio="vertical 9:16 portrait composition" if data.video_format=="shorts" else "horizontal 16:9 composition"
-    character = data.character_description.strip() or "consistent everyday Indian characters appropriate to the story; realistic age, face, hairstyle and clothing"
-    for i, text in enumerate(texts,1):
-        action, emotion=detect_action(text), detect_emotion(text)
-        prompt=(f"{data.visual_style}, {ratio}. A single coherent cinematic film still for scene {i}. "
-                f"Show this exact story moment: {text}. Characters and continuity: {character}. "
-                f"Visible action: {action}. Facial emotion: {emotion}. "
-                "Photorealistic human faces, believable Indian setting and details, natural skin texture, "
-                "realistic hands, professional cinematography, expressive composition, detailed environment, "
-                "soft depth of field, natural color grading. No words, no letters, no subtitles, no logos, no watermark.")
-        scenes.append({"scene_id":str(uuid.uuid4()),"scene_number":i,"scene_text":text,
-            "duration_seconds":max(3,min(8,round(len(text.split())/2.5))),"characters":character,
-            "action":action,"emotion":emotion,"location":"story setting","camera_direction":"cinematic medium shot",
-            "dialogue_or_voiceover":text,"image_prompt":prompt,
-            "motion_prompt":f"Subtle cinematic camera movement for {action}; preserve natural expression and anatomy.",
-            "image_status":"not_generated","video_status":"not_generated","image_url":None,"video_url":None})
-    job={"job_id":jid,"status":"planned","planner_type":"rule_based_v3","language":data.language,
-         "video_format":data.video_format,"visual_style":data.visual_style,"target_duration":data.target_duration,
-         "character_description":character,"total_scenes":len(scenes),"scenes":scenes,
-         "created_at":datetime.now(timezone.utc).isoformat()}
-    SCENE_JOBS[jid]=job
-    return {"success":True,"message":"Scene plan created","job":job}
 
-@router.get("/jobs")
-def get_scene_jobs(): return {"success":True,"total_jobs":len(SCENE_JOBS),"jobs":list(SCENE_JOBS.values())}
+def _frame_count(seconds: float, fps: int = 24) -> int:
+    # LTX-Video temporal length is conventionally 8n+1; keep clips short for VRAM.
+    target = max(2.0, min(6.0, seconds))
+    choices = [(49, 49 / fps), (73, 73 / fps), (97, 97 / fps), (121, 121 / fps), (145, 145 / fps)]
+    return min(choices, key=lambda x: abs(x[1] - target))[0]
 
-@router.get("/jobs/{job_id}")
-def get_scene_job(job_id:str):
-    job=SCENE_JOBS.get(job_id)
-    if not job: raise HTTPException(404,"Scene job not found")
-    return {"success":True,"job":job}
+
+def _prompt(scene: Dict[str, Any], video_format: str, visual_style: str) -> str:
+    ratio = "vertical 9:16 portrait video" if video_format == "shorts" else "horizontal 16:9 landscape video"
+    character = scene.get("characters") or "consistent Indian characters, natural age-appropriate appearance"
+    action = scene.get("action") or "natural everyday movement"
+    emotion = scene.get("emotion") or "subtle natural emotion"
+    text = scene.get("scene_text") or ""
+    camera = scene.get("camera_direction") or "cinematic medium shot"
+    return (
+        f"Photorealistic live-action Indian cinema, {ratio}. {visual_style}. "
+        f"One continuous cinematic shot showing this exact story moment: {text}. "
+        f"Character continuity: {character}. Visible physical action: {action}. "
+        f"Facial performance: {emotion}; believable eye movement, breathing, natural body language, "
+        f"subtle hand and head movement. Camera: {camera}, gentle controlled dolly or handheld movement, "
+        "realistic human anatomy, natural skin texture, practical lighting, cinematic depth of field, "
+        "film color grading, stable faces, coherent motion from beginning to end. No cuts, no text, "
+        "no subtitles, no logos, no watermark."
+    )
+
+
+def generate_scene_videos(job_id: str, scene_job: Dict[str, Any], total_audio_duration: float):
+    health = video_worker_health()
+    if not health.get("success"):
+        raise RuntimeError("Real AI video generation is not ready: " + health.get("error", "unknown GPU worker error"))
+    scenes = scene_job.get("scenes") or []
+    if not scenes:
+        raise RuntimeError("Scene planner returned no scenes.")
+    weights = [max(1, len((s.get("scene_text") or "").split())) for s in scenes]
+    total_weight = sum(weights)
+    generated = []
+    for index, (scene, weight) in enumerate(zip(scenes, weights), 1):
+        target = total_audio_duration * weight / total_weight
+        payload = {
+            "prompt": _prompt(scene, scene_job.get("video_format", "shorts"), scene_job.get("visual_style", "cinematic natural lighting")),
+            "negative_prompt": "cartoon, anime, illustration, plastic skin, deformed face, extra fingers, extra limbs, flicker, jitter, abrupt camera shake, text, captions, watermark",
+            "width": 512 if scene_job.get("video_format") == "shorts" else 896,
+            "height": 896 if scene_job.get("video_format") == "shorts" else 512,
+            "num_frames": _frame_count(target),
+            "fps": 24,
+            "steps": int(os.getenv("VIDEO_INFERENCE_STEPS", "30")),
+            "guidance_scale": 3.0,
+            "seed": int(os.getenv("VIDEO_BASE_SEED", "20261105")) + index,
+        }
+        try:
+            response = requests.post(WORKER_URL + "/generate-video", json=payload,
+                                     headers=_headers(), timeout=TIMEOUT)
+            response.raise_for_status()
+            body = response.json()
+            if not body.get("success") or not body.get("video_base64"):
+                raise RuntimeError(body.get("error", "Worker returned no video clip."))
+            clip_bytes = base64.b64decode(body["video_base64"])
+            clip_path = OUTPUT_DIR / f"{job_id}_scene_{index:02d}.mp4"
+            clip_path.write_bytes(clip_bytes)
+            scene["video_url"] = f"/outputs/{clip_path.name}"
+            scene["video_status"] = "completed"
+            scene["video_duration_seconds"] = body.get("duration_seconds")
+            generated.append(clip_path)
+        except Exception as exc:
+            scene["video_status"] = "failed"
+            scene["video_error"] = str(exc)
+            raise RuntimeError(f"Scene {index} video generation failed: {exc}") from exc
+    return generated
+
+
+def compose_cinematic_video(job_id: str, clip_paths, audio_path: Path, video_format: str,
+                            resolution: str, audio_duration: float, ffmpeg: str):
+    if not clip_paths:
+        raise RuntimeError("No moving video clips were generated; final render stopped.")
+    list_path = OUTPUT_DIR / f"{job_id}_concat.txt"
+    # FFmpeg concat demuxer requires escaped absolute paths.
+    lines = []
+    total_clip_duration = 0.0
+    for p in clip_paths:
+        escaped = str(p.resolve()).replace("'", "'\\''")
+        lines.append(f"file '{escaped}'")
+        # Read duration from ffprobe-like ffmpeg output.
+        import subprocess, re
+        probe = subprocess.run([ffmpeg, "-i", str(p), "-hide_banner"], capture_output=True, text=True)
+        match = re.search(r"Duration: (\d+):(\d+):(\d+)\.(\d+)", probe.stderr or "")
+        if match:
+            total_clip_duration += int(match.group(1))*3600 + int(match.group(2))*60 + int(match.group(3)) + int(match.group(4))/100
+    list_path.write_text("\n".join(lines), encoding="utf-8")
+    width, height = (720, 1280) if video_format == "shorts" else (1280, 720)
+    if resolution == "1080p":
+        width, height = width * 1.5, height * 1.5
+    width, height = int(width), int(height)
+    extra_hold = max(0.0, audio_duration - total_clip_duration)
+    out_path = OUTPUT_DIR / f"{job_id}.mp4"
+    vf = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps=24,setsar=1,format=yuv420p"
+    if extra_hold > 0.15:
+        vf += f",tpad=stop_mode=clone:stop_duration={extra_hold:.3f}"
+    cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), "-i", str(audio_path),
+           "-vf", vf, "-map", "0:v:0", "-map", "1:a:0", "-t", f"{audio_duration:.3f}",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", str(out_path)]
+    import subprocess
+    run = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        list_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    if run.returncode != 0:
+        raise RuntimeError("Cinematic video composition failed: " + (run.stderr[-2000:] if run.stderr else "unknown FFmpeg error"))
+    return out_path
