@@ -1,174 +1,183 @@
-import os, uuid, sqlite3, subprocess, re, asyncio
+"""Personal AI Video Studio GPU worker.
+
+Adds a real text-to-video endpoint alongside the existing SDXL image endpoint.
+Video backend: LTX-Video (legacy open-weight Diffusers pipeline).
+This worker detects VRAM and refuses local video generation below the configured
+minimum instead of silently returning a still-image slideshow.
+"""
+import base64
+import gc
+import os
+import threading
+import tempfile
 from pathlib import Path
-from datetime import datetime, timezone
-from threading import Thread
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from typing import Optional
+
+import torch
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
-from gtts import gTTS
-import edge_tts
-import imageio_ffmpeg
-from scene_engine import router as scene_router
-from image_engine import router as image_router
+from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, LTXPipeline
+from diffusers.utils import export_to_video
 
-app = FastAPI(title="Personal AI Video Studio", version="2.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-BASE_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = BASE_DIR / "outputs"
-OUTPUT_DIR.mkdir(exist_ok=True)
-DB_PATH = BASE_DIR / "video_jobs.db"
-FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
-app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
-app.include_router(scene_router)
-app.include_router(image_router)
+IMAGE_MODEL_ID = os.getenv("MODEL_ID", "stabilityai/sdxl-turbo")
+VIDEO_MODEL_ID = os.getenv("VIDEO_MODEL_ID", "Lightricks/LTX-Video")
+TOKEN = os.getenv("IMAGE_WORKER_TOKEN", "")
+MIN_VIDEO_VRAM_GB = float(os.getenv("MIN_VIDEO_VRAM_GB", "10"))
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-class AudioRequest(BaseModel):
-    script: str = Field(min_length=1, max_length=10000)
-    language: str = "hi"
-    voice_speed: float = Field(default=1.0, ge=0.5, le=2.0)
-    voice_gender: str = "female"
+app = FastAPI(title="Personal AI Video Studio GPU Worker", version="4.0.0")
+image_pipe = None
+image_to_image_pipe = None
+video_pipe = None
+active_model = "none"
+model_lock = threading.Lock()
 
-class VideoJobRequest(BaseModel):
-    script: str = Field(min_length=1, max_length=50000)
-    language: str = "hi"
-    video_format: str = "shorts"
-    resolution: str = "720p"
-    voice_speed: float = Field(default=1.0, ge=0.5, le=2.0)
-    voice_gender: str = "female"
+class ImageRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=6000)
+    negative_prompt: str = ""
+    width: int = Field(default=576, ge=256, le=1024)
+    height: int = Field(default=1024, ge=256, le=1536)
+    steps: int = Field(default=4, ge=1, le=8)
+    guidance_scale: float = Field(default=0.0, ge=0.0, le=10.0)
+    seed: int = -1
+    reference_image_base64: Optional[str] = None
+    strength: float = Field(default=0.62, ge=0.2, le=0.9)
 
-VOICE_MAP = {
-    "hi": {
-        "female": "hi-IN-SwaraNeural",
-        "male": "hi-IN-MadhurNeural",
-    },
-    "en": {
-        "female": "en-IN-NeerjaNeural",
-        "male": "en-IN-PrabhatNeural",
-    },
-}
+class VideoRequest(BaseModel):
+    prompt: str = Field(min_length=5, max_length=6000)
+    negative_prompt: str = "low quality, blurry, jittery motion, deformed face, extra limbs, flicker, text, watermark"
+    width: int = Field(default=512, ge=320, le=1024)
+    height: int = Field(default=896, ge=320, le=1024)
+    num_frames: int = Field(default=97, ge=49, le=145)
+    fps: int = Field(default=24, ge=8, le=30)
+    steps: int = Field(default=30, ge=8, le=50)
+    guidance_scale: float = Field(default=3.0, ge=1.0, le=5.0)
+    seed: int = -1
 
-def make_speech(text, language, voice_gender, voice_speed, output_path):
-    """Prefer neural Edge voices; fall back to gTTS if the online service fails."""
-    gender = (voice_gender or "female").lower()
-    if gender not in ("female", "male"):
-        raise ValueError("voice_gender must be 'female' or 'male'")
 
-    voice = VOICE_MAP.get(language, {}).get(gender)
-    if voice:
-        # Convert 0.5–2.0 speed into Edge TTS's supported percentage range.
-        rate_percent = max(-50, min(50, round((voice_speed - 1.0) * 100)))
-        rate = f"{rate_percent:+d}%"
+def auth(value):
+    if TOKEN and value != "Bearer " + TOKEN:
+        raise HTTPException(401, "Invalid worker token.")
+
+
+def gpu_info():
+    if not torch.cuda.is_available():
+        return {"cuda_available": False, "device": "cpu", "gpu_name": None, "vram_total_gb": 0.0,
+                "vram_free_gb": 0.0, "video_generation_supported": False,
+                "reason": "CUDA GPU is not available on this worker."}
+    props = torch.cuda.get_device_properties(0)
+    free_bytes, total_bytes = torch.cuda.mem_get_info(0)
+    total_gb = round(total_bytes / (1024**3), 2)
+    free_gb = round(free_bytes / (1024**3), 2)
+    supported = total_gb >= MIN_VIDEO_VRAM_GB
+    return {"cuda_available": True, "device": "cuda", "gpu_name": props.name,
+            "vram_total_gb": total_gb, "vram_free_gb": free_gb,
+            "video_generation_supported": supported,
+            "video_model": VIDEO_MODEL_ID if supported else None,
+            "reason": None if supported else f"Local LTX video generation needs at least {MIN_VIDEO_VRAM_GB} GB VRAM; this GPU reports {total_gb} GB."}
+
+
+def clear_models():
+    global image_pipe, image_to_image_pipe, video_pipe, active_model
+    image_pipe = None
+    image_to_image_pipe = None
+    video_pipe = None
+    active_model = "none"
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def load_image_models():
+    global image_pipe, image_to_image_pipe, active_model
+    if active_model == "image" and image_pipe is not None:
+        return
+    clear_models()
+    dtype = torch.float16 if DEVICE == "cuda" else torch.float32
+    pipe = AutoPipelineForText2Image.from_pretrained(IMAGE_MODEL_ID, torch_dtype=dtype, use_safetensors=True)
+    pipe.to(DEVICE)
+    image_pipe = pipe
+    image_to_image_pipe = AutoPipelineForImage2Image.from_pipe(pipe)
+    image_to_image_pipe.to(DEVICE)
+    if DEVICE == "cuda":
+        image_pipe.enable_attention_slicing()
+        image_to_image_pipe.enable_attention_slicing()
+    active_model = "image"
+
+
+def load_video_model():
+    global video_pipe, active_model
+    if video_pipe is not None and active_model == "video":
+        return
+    info = gpu_info()
+    if not info["video_generation_supported"]:
+        raise RuntimeError(info["reason"])
+    clear_models()
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    pipe = LTXPipeline.from_pretrained(VIDEO_MODEL_ID, torch_dtype=dtype)
+    # Offload is safer for unknown GPU models; generation may be slower than full-GPU mode.
+    pipe.enable_model_cpu_offload()
+    video_pipe = pipe
+    active_model = "video"
+
+
+@app.get("/health")
+def health():
+    info = gpu_info()
+    return {"status": "healthy", "version": "4.0.0", "image_model": IMAGE_MODEL_ID,
+            "video_model": VIDEO_MODEL_ID, "active_model": active_model,
+            "models_loaded": {"image": image_pipe is not None, "video": video_pipe is not None}, **info}
+
+
+@app.post("/generate")
+def generate_image(data: ImageRequest, authorization: Optional[str] = Header(default=None)):
+    global image_pipe, image_to_image_pipe
+    auth(authorization)
+    with model_lock:
         try:
-            asyncio.run(edge_tts.Communicate(text, voice, rate=rate).save(str(output_path)))
-            if output_path.exists() and output_path.stat().st_size > 1000:
-                return {"engine": "edge-tts", "voice": voice, "fallback_used": False}
-            raise RuntimeError("Edge TTS returned an empty audio file")
-        except Exception:
-            if output_path.exists():
-                output_path.unlink()
+            load_image_models()
+            gen = torch.Generator(device=DEVICE).manual_seed(data.seed) if data.seed >= 0 else None
+            with torch.inference_mode():
+                if data.reference_image_base64:
+                    from PIL import Image
+                    import io
+                    raw = base64.b64decode(data.reference_image_base64)
+                    init = Image.open(io.BytesIO(raw)).convert("RGB").resize((data.width, data.height))
+                    result = image_to_image_pipe(prompt=data.prompt, negative_prompt=data.negative_prompt or None,
+                        image=init, strength=data.strength, num_inference_steps=max(2, data.steps),
+                        guidance_scale=data.guidance_scale, generator=gen)
+                else:
+                    result = image_pipe(prompt=data.prompt, negative_prompt=data.negative_prompt or None,
+                        width=data.width, height=data.height, num_inference_steps=data.steps,
+                        guidance_scale=data.guidance_scale, generator=gen)
+            import io
+            out = io.BytesIO()
+            result.images[0].save(out, format="PNG")
+            return {"success": True, "image_base64": base64.b64encode(out.getvalue()).decode("utf-8"),
+                    "width": result.images[0].width, "height": result.images[0].height, "model": IMAGE_MODEL_ID}
+        except Exception as exc:
+            raise HTTPException(500, f"Image generation error: {exc}")
 
-    # gTTS remains as a compatibility fallback and for Marathi.
-    gTTS(text=text, lang=language, slow=False).save(str(output_path))
-    return {
-        "engine": "gTTS",
-        "voice": "default",
-        "fallback_used": bool(voice),
-    }
 
-def db():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-@app.on_event("startup")
-def startup():
-    with db() as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS video_jobs (
-            job_id TEXT PRIMARY KEY, status TEXT NOT NULL, progress INTEGER NOT NULL,
-            script TEXT NOT NULL, language TEXT NOT NULL, video_format TEXT NOT NULL,
-            resolution TEXT NOT NULL, video_url TEXT, error TEXT, created_at TEXT NOT NULL)''')
-
-def update_job(job_id, status, progress, video_url=None, error=None):
-    with db() as conn:
-        conn.execute("UPDATE video_jobs SET status=?, progress=?, video_url=?, error=? WHERE job_id=?",
-                     (status, progress, video_url, error, job_id))
-
-def render_video(job_id, script, language, video_format, resolution, voice_gender="female", voice_speed=1.0):
-    audio_path, video_path = OUTPUT_DIR / f"{job_id}.mp3", OUTPUT_DIR / f"{job_id}.mp4"
-    try:
-        update_job(job_id, "processing", 10)
-        make_speech(script, language, voice_gender, voice_speed, audio_path)
-        update_job(job_id, "processing", 40)
-        width, height = (720, 1280) if video_format == "shorts" else (1280, 720)
-        if resolution == "1080p": width, height = int(width*1.5), int(height*1.5)
-        result = subprocess.run([FFMPEG, "-i", str(audio_path), "-hide_banner"], capture_output=True, text=True)
-        m = re.search(r"Duration: (\d+):(\d+):(\d+)\.(\d+)", result.stderr)
-        if not m: raise RuntimeError("Could not read audio duration")
-        duration = int(m.group(1))*3600 + int(m.group(2))*60 + int(m.group(3)) + int(m.group(4))/100
-        update_job(job_id, "processing", 60)
-        cmd = [FFMPEG, "-y", "-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:d={duration}",
-               "-i", str(audio_path), "-vf", "format=yuv420p", "-c:v", "libx264", "-preset", "ultrafast",
-               "-tune", "stillimage", "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", str(video_path)]
-        subprocess.run(cmd, check=True, capture_output=True)
-        update_job(job_id, "completed", 100, f"/outputs/{job_id}.mp4")
-    except Exception as exc:
-        update_job(job_id, "failed", 0, error=str(exc))
-    finally:
-        if audio_path.exists(): audio_path.unlink()
-
-@app.get("/")
-def home(): return {"success": True, "engine": "Personal AI Video Studio", "status": "online", "version": "2.1.0"}
-
-@app.get("/api/health")
-def health(): return {"status": "healthy", "version": "2.1.0"}
-
-@app.post("/api/generate-audio")
-def generate_audio(data: AudioRequest):
-    if data.language not in ["hi", "mr", "en"]:
-        raise HTTPException(400, "Supported languages: hi, mr, en")
-    if data.voice_gender.lower() not in ["female", "male"]:
-        raise HTTPException(400, "voice_gender must be female or male")
-    try:
-        name = f"{uuid.uuid4().hex}.mp3"
-        result = make_speech(data.script, data.language, data.voice_gender, data.voice_speed, OUTPUT_DIR / name)
-        return {
-            "success": True,
-            "language": data.language,
-            "voice_gender": data.voice_gender.lower(),
-            "voice": result["voice"],
-            "engine": result["engine"],
-            "fallback_used": result["fallback_used"],
-            "audio_url": f"/outputs/{name}",
-            "download_url": f"/outputs/{name}",
-        }
-    except Exception as exc:
-        raise HTTPException(500, str(exc))
-
-@app.post("/api/video/jobs")
-def create_video_job(data: VideoJobRequest):
-    if data.language not in ["hi", "mr", "en"]: raise HTTPException(400, "Supported languages: hi, mr, en")
-    if data.voice_gender.lower() not in ["female", "male"]: raise HTTPException(400, "voice_gender must be female or male")
-    if data.video_format not in ["shorts", "landscape"]: raise HTTPException(400, "Format must be shorts or landscape")
-    if data.resolution not in ["720p", "1080p"]: raise HTTPException(400, "Resolution must be 720p or 1080p")
-    jid, created = str(uuid.uuid4()), datetime.now(timezone.utc).isoformat()
-    with db() as conn:
-        conn.execute("INSERT INTO video_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                     (jid, "queued", 0, data.script, data.language, data.video_format, data.resolution, None, None, created))
-    Thread(
-        target=render_video,
-        args=(jid, data.script, data.language, data.video_format, data.resolution, data.voice_gender.lower(), data.voice_speed),
-        daemon=True
-    ).start()
-    return {"success": True, "job_id": jid, "status": "queued"}
-
-@app.get("/api/video/jobs/{job_id}")
-def get_video_job(job_id: str):
-    with db() as conn: row = conn.execute("SELECT * FROM video_jobs WHERE job_id=?", (job_id,)).fetchone()
-    if not row: raise HTTPException(404, "Video job not found")
-    return {"success": True, "job": dict(row)}
-
-@app.get("/api/video/jobs")
-def get_all_video_jobs():
-    with db() as conn: rows = conn.execute("SELECT * FROM video_jobs ORDER BY created_at DESC").fetchall()
-    return {"success": True, "total_jobs": len(rows), "jobs": [dict(x) for x in rows]}
+@app.post("/generate-video")
+def generate_video(data: VideoRequest, authorization: Optional[str] = Header(default=None)):
+    auth(authorization)
+    with model_lock:
+        try:
+            load_video_model()
+            gen = torch.Generator(device="cuda").manual_seed(data.seed) if data.seed >= 0 else None
+            with torch.inference_mode():
+                result = video_pipe(prompt=data.prompt, negative_prompt=data.negative_prompt,
+                    width=data.width, height=data.height, num_frames=data.num_frames,
+                    num_inference_steps=data.steps, guidance_scale=data.guidance_scale,
+                    generator=gen, output_type="pil")
+            frames = result.frames[0]
+            with tempfile.TemporaryDirectory() as tmp:
+                mp4_path = Path(tmp) / "scene.mp4"
+                export_to_video(frames, str(mp4_path), fps=data.fps)
+                video_bytes = mp4_path.read_bytes()
+            return {"success": True, "video_base64": base64.b64encode(video_bytes).decode("utf-8"),
+                    "mime_type": "video/mp4", "frames": len(frames), "fps": data.fps,
+                    "duration_seconds": round(len(frames) / data.fps, 2), "model": VIDEO_MODEL_ID}
+        except Exception as exc:
+            raise HTTPException(500, f"Video generation error: {exc}")
