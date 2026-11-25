@@ -1,56 +1,44 @@
-import base64, os, uuid
-from pathlib import Path
-from typing import Optional
-import requests
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
-from scene_engine import SCENE_JOBS
+    if result.get("success") is False:
+        raise HTTPException(502, f"GPU worker generation failed: {result.get('error', 'Unknown error')}")
 
-router = APIRouter(prefix="/api/images", tags=["AI Image Engine"])
-OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
-OUTPUT_DIR.mkdir(exist_ok=True)
-WORKER_URL = os.getenv("IMAGE_WORKER_URL", "").rstrip("/")
-WORKER_TOKEN = os.getenv("IMAGE_WORKER_TOKEN", "")
-TIMEOUT = int(os.getenv("IMAGE_WORKER_TIMEOUT", "240"))
+    encoded = result.get("image_base64")
+    if not isinstance(encoded, str) or not encoded.strip():
+        raise HTTPException(
+            502,
+            f"GPU worker response is missing image_base64. Response keys: {list(result.keys())}",
+        )
 
-class ImageRequest(BaseModel):
-    width: int = Field(default=576, ge=256, le=1024)
-    height: int = Field(default=1024, ge=256, le=1024)
-    strength: float = Field(default=0.62, ge=0.2, le=0.9)
-    generate_character_reference: bool = True
-    reference_image_base64: Optional[str] = None
-
-def worker_call(payload):
-    if not WORKER_URL:
-        raise HTTPException(503, "Set IMAGE_WORKER_URL in Render environment variables.")
-    headers = {"Content-Type": "application/json"}
-    if WORKER_TOKEN:
-        headers["Authorization"] = f"Bearer {WORKER_TOKEN}"
     try:
-        r = requests.post(WORKER_URL + "/generate", json=payload, headers=headers, timeout=TIMEOUT)
-        r.raise_for_status()
-        result = r.json()
-        return base64.b64decode(result["image_base64"])
-    except requests.RequestException as exc:
-        raise HTTPException(502, f"GPU worker request failed: {exc}")
-    except (KeyError, ValueError) as exc:
-        raise HTTPException(502, f"Invalid GPU worker response: {exc}")
+        image_bytes = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(502, "GPU worker returned invalid base64 image data.") from exc
 
-def save_png(data, filename):
+    if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise HTTPException(502, "GPU worker image payload is not a valid PNG file.")
+
+    return image_bytes
+
+
+def save_png(data: bytes, filename: str) -> str:
     (OUTPUT_DIR / filename).write_bytes(data)
     return "/outputs/" + filename
+
 
 @router.get("/health")
 def image_health():
     if not WORKER_URL:
         return {"success": True, "configured": False, "status": "waiting_for_gpu_worker"}
+
+    headers = {"Authorization": f"Bearer {WORKER_TOKEN}"} if WORKER_TOKEN else {}
     try:
-        headers = {"Authorization": f"Bearer {WORKER_TOKEN}"} if WORKER_TOKEN else {}
-        r = requests.get(WORKER_URL + "/health", headers=headers, timeout=15)
-        r.raise_for_status()
-        return {"success": True, "configured": True, "worker": r.json()}
+        response = requests.get(f"{WORKER_URL}/health", headers=headers, timeout=15)
+        response.raise_for_status()
+        return {"success": True, "configured": True, "provider": "existing_gpu_worker", "worker": response.json()}
     except requests.RequestException as exc:
         return {"success": False, "configured": True, "error": str(exc)}
+    except ValueError as exc:
+        return {"success": False, "configured": True, "error": f"Worker health returned invalid JSON: {exc}"}
+
 
 @router.post("/jobs/{job_id}/generate")
 def generate_images(job_id: str, data: ImageRequest):
@@ -59,48 +47,58 @@ def generate_images(job_id: str, data: ImageRequest):
         raise HTTPException(404, "Scene job not found.")
     if not WORKER_URL:
         raise HTTPException(503, "GPU worker is not connected. Configure IMAGE_WORKER_URL.")
+
+    # Current Colab deployment loads only AutoPipelineForText2Image.
+    # Reject reference-image requests instead of silently ignoring them.
+    if data.generate_character_reference or data.reference_image_base64:
+        raise HTTPException(
+            501,
+            "Character-reference / image-to-image generation is not enabled on the current text-to-image GPU worker.",
+        )
+
     job["image_generation_status"] = "processing"
     job["image_generation_error"] = None
-    try:
-        reference = data.reference_image_base64
-        if not reference and data.generate_character_reference:
-            desc = job.get("character_description") or "the main story characters"
-            prompt = ("Character reference sheet, full body, front view, neutral simple background. "
-                      + desc + ". Show only the described characters, clearly separated. "
-                      "Keep faces, age, hairstyle and clothing visible. " +
-                      job.get("visual_style", "cinematic realistic") +
-                      " style, no text, no labels, no watermark.")
-            raw = worker_call({"prompt": prompt, "negative_prompt": "extra people, crowd, duplicate person, text, watermark",
-                               "width": data.width, "height": data.height, "steps": 1,
-                               "guidance_scale": 0.0, "seed": -1})
-            job["character_reference_url"] = save_png(raw, f"{job_id}_character_reference.png")
-            reference = base64.b64encode(raw).decode("utf-8")
+    completed = 0
 
-        completed = 0
-        for scene in job["scenes"]:
+    try:
+        for scene in job.get("scenes", []):
             scene["image_status"] = "processing"
-            payload = {"prompt": scene["image_prompt"],
-                       "negative_prompt": "different face, different clothes, extra people, duplicate person, bad anatomy, text, watermark, blurry",
-                       "width": data.width, "height": data.height, "steps": 4,
-                       "guidance_scale": 0.0, "seed": -1,
-                       "reference_image_base64": reference, "strength": data.strength}
+            payload = {
+                "prompt": scene["image_prompt"],
+                "negative_prompt": "different face, different clothes, extra people, duplicate person, bad anatomy, text, watermark, blurry",
+                "width": data.width,
+                "height": data.height,
+                "steps": 2,
+                "guidance_scale": 0.0,
+            }
             raw = worker_call(payload)
             scene["image_url"] = save_png(raw, f"{job_id}_scene_{scene['scene_number']}.png")
             scene["image_status"] = "completed"
             scene["image_error"] = None
             completed += 1
+
         job["image_generation_status"] = "completed"
         job["images_generated"] = completed
-        return {"success": True, "job_id": job_id, "images_generated": completed,
-                "character_reference_url": job.get("character_reference_url"),
-                "scenes": job["scenes"]}
+        return {
+            "success": True,
+            "job_id": job_id,
+            "images_generated": completed,
+            "character_reference_url": None,
+            "scenes": job.get("scenes", []),
+        }
+    except HTTPException as exc:
+        job["image_generation_status"] = "failed"
+        job["image_generation_error"] = exc.detail
+        for scene in job.get("scenes", []):
+            if scene.get("image_status") == "processing":
+                scene["image_status"] = "failed"
+                scene["image_error"] = exc.detail
+        raise
     except Exception as exc:
         job["image_generation_status"] = "failed"
         job["image_generation_error"] = str(exc)
-        for scene in job["scenes"]:
+        for scene in job.get("scenes", []):
             if scene.get("image_status") == "processing":
                 scene["image_status"] = "failed"
                 scene["image_error"] = str(exc)
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(500, f"Image generation failed: {exc}")
+        raise HTTPException(500, f"Image generation failed: {exc}") from exc
