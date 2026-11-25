@@ -36,10 +36,17 @@ def worker_call(payload):
     if WORKER_TOKEN: headers["Authorization"]=f"Bearer {WORKER_TOKEN}"
     try:
         r=requests.post(WORKER_URL+"/generate",json=payload,headers=headers,timeout=TIMEOUT)
-        r.raise_for_status(); body=r.json()
+        r.raise_for_status()
+        body = r.json()
         if not body.get("success") or not body.get("image_base64"):
-            raise RuntimeError(body.get("error","GPU worker returned no image."))
-        return base64.b64decode(body["image_base64"])
+            raise RuntimeError(body.get("error", "GPU worker returned no image."))
+        try:
+            image_bytes = base64.b64decode(body["image_base64"], validate=True)
+        except Exception as decode_error:
+            raise RuntimeError("GPU worker returned invalid base64 image data.") from decode_error
+        if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise RuntimeError("GPU worker response is not a valid PNG image.")
+        return image_bytes
     except requests.RequestException as exc:
         raise RuntimeError(f"GPU worker request failed: {exc}") from exc
 
