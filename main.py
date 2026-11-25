@@ -96,7 +96,7 @@ class VideoJobRequest(BaseModel):
     image_strength: float = Field(default=0.62, ge=0.2, le=0.9)
 
     generate_character_reference: bool = True
-    render_mode: str = "cinematic"
+    render_mode: str = "slideshow"
 
     target_duration: int = Field(default=60, ge=5, le=3600)
 
@@ -120,7 +120,7 @@ class LegacyVideoRequest(BaseModel):
     voice_gender: str = "female"
     voice_speed: float = Field(default=1.0, ge=0.5, le=2.0)
 
-    render_mode: str = "cinematic"
+    render_mode: str = "slideshow"
 
 
 # ==========================================================
@@ -223,7 +223,7 @@ def audio_duration(path):
 
     match = re.search(
         r"Duration: (\d+):(\d+):(\d+)\.(\d+)",
-        result.stderr,
+        result.stderr or "",
     )
 
     if not match:
@@ -231,11 +231,13 @@ def audio_duration(path):
             "Could not read generated voice-over duration."
         )
 
+    hours, minutes, seconds, fraction = match.groups()
+    fractional_seconds = int(fraction) / (10 ** len(fraction))
     return (
-        int(match.group(1)) * 3600
-        + int(match.group(2)) * 60
-        + int(match.group(3))
-        + int(match.group(4)) / 100
+        int(hours) * 3600
+        + int(minutes) * 60
+        + int(seconds)
+        + fractional_seconds
     )
 
 
