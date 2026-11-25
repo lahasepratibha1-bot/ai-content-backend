@@ -94,3 +94,53 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
         height = _dimension(data.get("height", 512), "height")
         steps = _safe_int(data.get("steps", 2), "steps", 1, 8)
         negative_prompt = str(data.get("negative_prompt", "")).strip() or None
+        guidance = float(data.get("guidance_scale", 0.0))
+        if not 0.0 <= guidance <= 10.0:
+            raise ValueError("guidance_scale must be between 0 and 10")
+        strength = float(data.get("strength", 0.62))
+        if not 0.2 <= strength <= 0.9:
+            raise ValueError("strength must be between 0.2 and 0.9")
+        seed = int(data.get("seed", -1))
+        generator: Optional[torch.Generator] = None
+        if seed >= 0:
+            generator = torch.Generator(device=DEVICE).manual_seed(seed)
+
+        reference = data.get("reference_image_base64")
+        common = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "num_inference_steps": max(2, steps) if reference else steps,
+            "guidance_scale": guidance,
+            "generator": generator,
+        }
+        if reference:
+            init_image = _decode_reference(str(reference), width, height)
+            result = image_pipe(image=init_image, strength=strength, **common)
+            mode = "image_to_image"
+        else:
+            result = text_pipe(width=width, height=height, **common)
+            mode = "text_to_image"
+
+        images = getattr(result, "images", None)
+        if not images:
+            raise RuntimeError("Diffusers returned no generated image")
+
+        output = io.BytesIO()
+        images[0].save(output, format="PNG")
+        encoded = base64.b64encode(output.getvalue()).decode("ascii")
+        return {
+            "success": True,
+            "image_base64": encoded,
+            "width": images[0].width,
+            "height": images[0].height,
+            "model": MODEL_ID,
+            "mode": mode,
+        }
+    except Exception as exc:
+        print(f"Generation failed: {type(exc).__name__}: {exc}")
+        return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+if __name__ == "__main__":
+    load_models()
+    runpod.serverless.start({"handler": handler})
