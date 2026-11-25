@@ -22,7 +22,9 @@ from diffusers.utils import export_to_video
 IMAGE_MODEL_ID = os.getenv("MODEL_ID", "stabilityai/sdxl-turbo")
 VIDEO_MODEL_ID = os.getenv("VIDEO_MODEL_ID", "Lightricks/LTX-Video")
 TOKEN = os.getenv("IMAGE_WORKER_TOKEN", "")
-MIN_VIDEO_VRAM_GB = float(os.getenv("MIN_VIDEO_VRAM_GB", "10"))
+# Conservative default: LTX-Video is a large model. Lower this only after
+# validating the exact model, precision and offload strategy on the target GPU.
+MIN_VIDEO_VRAM_GB = float(os.getenv("MIN_VIDEO_VRAM_GB", "24"))
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 app = FastAPI(title="Personal AI Video Studio GPU Worker", version="4.0.0")
@@ -56,7 +58,9 @@ class VideoRequest(BaseModel):
 
 
 def auth(value):
-    if TOKEN and value != "Bearer " + TOKEN:
+    if not TOKEN:
+        raise HTTPException(503, "IMAGE_WORKER_TOKEN is not configured on the GPU worker.")
+    if value != "Bearer " + TOKEN:
         raise HTTPException(401, "Invalid worker token.")
 
 
