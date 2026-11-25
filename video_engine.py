@@ -91,7 +91,12 @@ def generate_scene_videos(job_id: str, scene_job: Dict[str, Any], total_audio_du
             body = response.json()
             if not body.get("success") or not body.get("video_base64"):
                 raise RuntimeError(body.get("error", "Worker returned no video clip."))
-            clip_bytes = base64.b64decode(body["video_base64"])
+            try:
+                clip_bytes = base64.b64decode(body["video_base64"], validate=True)
+            except Exception as decode_error:
+                raise RuntimeError("GPU worker returned invalid base64 video data.") from decode_error
+            if len(clip_bytes) < 12 or clip_bytes[4:8] != b"ftyp":
+                raise RuntimeError("GPU worker response is not a valid MP4 file.")
             clip_path = OUTPUT_DIR / f"{job_id}_scene_{index:02d}.mp4"
             clip_path.write_bytes(clip_bytes)
             scene["video_url"] = f"/outputs/{clip_path.name}"
@@ -121,7 +126,13 @@ def compose_cinematic_video(job_id: str, clip_paths, audio_path: Path, video_for
         probe = subprocess.run([ffmpeg, "-i", str(p), "-hide_banner"], capture_output=True, text=True)
         match = re.search(r"Duration: (\d+):(\d+):(\d+)\.(\d+)", probe.stderr or "")
         if match:
-            total_clip_duration += int(match.group(1))*3600 + int(match.group(2))*60 + int(match.group(3)) + int(match.group(4))/100
+            fraction = match.group(4)
+            total_clip_duration += (
+                int(match.group(1)) * 3600
+                + int(match.group(2)) * 60
+                + int(match.group(3))
+                + int(fraction) / (10 ** len(fraction))
+            )
     list_path.write_text("\n".join(lines), encoding="utf-8")
     width, height = (720, 1280) if video_format == "shorts" else (1280, 720)
     if resolution == "1080p":
