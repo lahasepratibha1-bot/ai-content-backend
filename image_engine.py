@@ -1,3 +1,67 @@
+import base64
+import binascii
+import os
+from pathlib import Path
+from typing import Optional
+
+import requests
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from scene_engine import SCENE_JOBS
+
+router = APIRouter(prefix="/api/images", tags=["AI Image Engine"])
+OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+WORKER_URL = os.getenv("IMAGE_WORKER_URL", "").rstrip("/")
+WORKER_TOKEN = os.getenv("IMAGE_WORKER_TOKEN", "")
+TIMEOUT = int(os.getenv("IMAGE_WORKER_TIMEOUT", "240"))
+
+
+class ImageRequest(BaseModel):
+    width: int = Field(default=512, ge=256, le=1024)
+    height: int = Field(default=768, ge=256, le=1024)
+    strength: float = Field(default=0.62, ge=0.2, le=0.9)
+    # The current Colab worker is text-to-image only. Keep reference fields
+    # in the API contract, but do not silently pretend to use them.
+    generate_character_reference: bool = False
+    reference_image_base64: Optional[str] = None
+
+
+def worker_call(payload: dict) -> bytes:
+    if not WORKER_URL:
+        raise HTTPException(503, "GPU worker is not configured: IMAGE_WORKER_URL is empty.")
+
+    headers = {"Content-Type": "application/json"}
+    if WORKER_TOKEN:
+        headers["Authorization"] = f"Bearer {WORKER_TOKEN}"
+
+    try:
+        response = requests.post(
+            f"{WORKER_URL}/generate",
+            json=payload,
+            headers=headers,
+            timeout=TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(502, f"GPU worker connection failed: {exc}") from exc
+
+    if not response.ok:
+        detail = response.text[:1500]
+        raise HTTPException(
+            502,
+            f"GPU worker returned HTTP {response.status_code}: {detail}",
+        )
+
+    try:
+        result = response.json()
+    except ValueError as exc:
+        raise HTTPException(502, "GPU worker returned non-JSON response.") from exc
+
+    if not isinstance(result, dict):
+        raise HTTPException(502, "GPU worker response must be a JSON object.")
+
     if result.get("success") is False:
         raise HTTPException(502, f"GPU worker generation failed: {result.get('error', 'Unknown error')}")
 
@@ -30,75 +94,3 @@ def image_health():
         return {"success": True, "configured": False, "status": "waiting_for_gpu_worker"}
 
     headers = {"Authorization": f"Bearer {WORKER_TOKEN}"} if WORKER_TOKEN else {}
-    try:
-        response = requests.get(f"{WORKER_URL}/health", headers=headers, timeout=15)
-        response.raise_for_status()
-        return {"success": True, "configured": True, "provider": "existing_gpu_worker", "worker": response.json()}
-    except requests.RequestException as exc:
-        return {"success": False, "configured": True, "error": str(exc)}
-    except ValueError as exc:
-        return {"success": False, "configured": True, "error": f"Worker health returned invalid JSON: {exc}"}
-
-
-@router.post("/jobs/{job_id}/generate")
-def generate_images(job_id: str, data: ImageRequest):
-    job = SCENE_JOBS.get(job_id)
-    if not job:
-        raise HTTPException(404, "Scene job not found.")
-    if not WORKER_URL:
-        raise HTTPException(503, "GPU worker is not connected. Configure IMAGE_WORKER_URL.")
-
-    # Current Colab deployment loads only AutoPipelineForText2Image.
-    # Reject reference-image requests instead of silently ignoring them.
-    if data.generate_character_reference or data.reference_image_base64:
-        raise HTTPException(
-            501,
-            "Character-reference / image-to-image generation is not enabled on the current text-to-image GPU worker.",
-        )
-
-    job["image_generation_status"] = "processing"
-    job["image_generation_error"] = None
-    completed = 0
-
-    try:
-        for scene in job.get("scenes", []):
-            scene["image_status"] = "processing"
-            payload = {
-                "prompt": scene["image_prompt"],
-                "negative_prompt": "different face, different clothes, extra people, duplicate person, bad anatomy, text, watermark, blurry",
-                "width": data.width,
-                "height": data.height,
-                "steps": 2,
-                "guidance_scale": 0.0,
-            }
-            raw = worker_call(payload)
-            scene["image_url"] = save_png(raw, f"{job_id}_scene_{scene['scene_number']}.png")
-            scene["image_status"] = "completed"
-            scene["image_error"] = None
-            completed += 1
-
-        job["image_generation_status"] = "completed"
-        job["images_generated"] = completed
-        return {
-            "success": True,
-            "job_id": job_id,
-            "images_generated": completed,
-            "character_reference_url": None,
-            "scenes": job.get("scenes", []),
-        }
-    except HTTPException as exc:
-        job["image_generation_status"] = "failed"
-        job["image_generation_error"] = exc.detail
-        for scene in job.get("scenes", []):
-            if scene.get("image_status") == "processing":
-                scene["image_status"] = "failed"
-                scene["image_error"] = exc.detail
-        raise
-    except Exception as exc:
-        job["image_generation_status"] = "failed"
-        job["image_generation_error"] = str(exc)
-        for scene in job.get("scenes", []):
-            if scene.get("image_status") == "processing":
-                scene["image_status"] = "failed"
-                scene["image_error"] = str(exc)
-        raise HTTPException(500, f"Image generation failed: {exc}") from exc
