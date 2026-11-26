@@ -16,7 +16,7 @@ from typing import Optional
 import torch
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
-from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, LTXPipeline
+from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image
 from diffusers.utils import export_to_video
 
 IMAGE_MODEL_ID = os.getenv("MODEL_ID", "stabilityai/sdxl-turbo")
@@ -117,6 +117,10 @@ def load_video_model():
     if not info["video_generation_supported"]:
         raise RuntimeError(info["reason"])
     clear_models()
+    # Load the optional video pipeline only when video generation is requested.
+    # This keeps SDXL image generation independent from LTX import compatibility.
+    from diffusers import LTXPipeline
+
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     pipe = LTXPipeline.from_pretrained(VIDEO_MODEL_ID, torch_dtype=dtype)
     # Offload is safer for unknown GPU models; generation may be slower than full-GPU mode.
@@ -128,9 +132,19 @@ def load_video_model():
 @app.get("/health")
 def health():
     info = gpu_info()
-    return {"status": "healthy", "version": "4.0.0", "image_model": IMAGE_MODEL_ID,
-            "video_model": VIDEO_MODEL_ID, "active_model": active_model,
-            "models_loaded": {"image": image_pipe is not None, "video": video_pipe is not None}, **info}
+    return {
+        "status": "healthy",
+        "version": "4.0.0",
+        "image_model": IMAGE_MODEL_ID,
+        "image_generation_available": torch.cuda.is_available(),
+        "video_model": VIDEO_MODEL_ID,
+        "active_model": active_model,
+        "models_loaded": {
+            "image": image_pipe is not None,
+            "video": video_pipe is not None,
+        },
+        **info,
+    }
 
 
 @app.post("/generate")
