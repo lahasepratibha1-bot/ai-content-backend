@@ -95,6 +95,9 @@ def detect_action(text: str) -> str:
     s = text.lower()
 
     rules = [
+        ("writing", ["writes a letter", "writing a letter", "writes", "writing", "पत्र लिख", "लिहिते"]),
+        ("sitting", ["sits", "sitting", "बैठी", "बैठता", "बैठकर", "बसली", "बसतो"]),
+        ("walking", ["walks", "walking", "walk", "चलती", "चला", "गई", "गया", "चालली", "गेली"]),
         ("waking_up", [
             "उठी", "उठा", "जागी", "जागा", "उठती"
         ]),
@@ -134,6 +137,36 @@ def detect_action(text: str) -> str:
     return "natural_action"
 
 
+def scene_composition(action: str, text: str, ratio: str):
+    """Return action-led framing so scenes show the story, not repeated portraits."""
+    s = text.lower()
+    if action == "walking" or "garden" in s:
+        return (
+            "Three-quarter or full-body environmental shot, subject visibly walking "
+            "through a lush garden, one foot mid-step, arms and hands naturally visible, "
+            "garden path and greenery clearly visible behind her. Keep the head, neck, "
+            "shoulders and torso in realistic human proportions."
+        ), "Three-quarter full-body tracking shot at eye level"
+    if action == "writing" or any(x in s for x in ["letter", "table", "writes"]):
+        return (
+            "Medium-wide waist-up seated composition at a wooden table, both forearms "
+            "and hands visible writing on a letter with a pen, tabletop and letter clearly "
+            "visible in frame. Natural seated posture, shoulders relaxed, head and neck "
+            "proportioned naturally to the torso."
+        ), "Medium-wide seated shot, eye-level three-quarter angle"
+    if action == "sitting" or any(x in s for x in ["window", "rainy", "sits"]):
+        return (
+            "Medium-wide waist-up seated composition beside a clearly visible rain-streaked "
+            "window, subject looking outside, window frame and raindrops visible in the "
+            "background. Natural seated posture with shoulders visible and relaxed, "
+            "normal neck length and realistic head-to-body proportions."
+        ), "Medium-wide seated profile three-quarter shot"
+    return (
+        "Medium shot showing head, shoulders and upper torso with natural body proportions, "
+        "visible environment relevant to the story, avoid tight head-and-neck close-up."
+    ), "Cinematic medium shot at eye level"
+
+
 def create_scene_plan(data: SceneRequest):
     """Create a structured scene plan from a story script."""
 
@@ -164,19 +197,25 @@ def create_scene_plan(data: SceneRequest):
             else "16:9 horizontal landscape"
         )
 
+        composition, camera_direction = scene_composition(action, text, ratio)
+
         prompt = (
             f"Photorealistic live-action Indian cinematic scene. "
             f"{ratio} format. Scene {index}. "
             f"Story moment: {text}. "
             f"Characters: {character}. "
             f"Visible action: {action}. "
+            f"Required scene composition: {composition}. "
             f"Facial emotion: {emotion}. "
             f"Visual style: {data.visual_style}. "
-            "Maintain identical character face, age, hairstyle, "
-            "clothing and appearance across every scene. "
-            "Natural human anatomy with realistic neck length and natural neck-to-shoulder proportions, balanced head and shoulders, realistic skin texture, "
-            "natural expressions, cinematic lighting, "
-            "detailed Indian environment. "
+            "Preserve the same character identity, face shape, age, hairstyle and outfit "
+            "from the supplied reference image. "
+            "Anatomically realistic adult human proportions: average natural neck length "
+            "and width, neck connected naturally to visible shoulders, balanced head-to-body "
+            "ratio, realistic shoulder width and upper torso. "
+            "Use a medium or wider camera framing that shows the stated action and its "
+            "environment; do not turn every scene into a centered beauty portrait. "
+            "Natural skin texture, natural expression, cinematic lighting, detailed Indian environment. "
             "No text, no subtitles, no logo, no watermark."
         )
 
@@ -203,7 +242,7 @@ def create_scene_plan(data: SceneRequest):
             "action": action,
             "emotion": emotion,
             "location": "To be identified by AI",
-            "camera_direction": "Cinematic medium shot with subtle movement",
+            "camera_direction": camera_direction,
             "dialogue_or_voiceover": text,
             "image_prompt": prompt,
             "motion_prompt": motion_prompt,
