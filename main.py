@@ -436,13 +436,15 @@ def render_video(job_id, data):
     try:
         update_job(job_id, "processing", 5)
 
-        image_health = worker_health()
-
-        if not image_health.get("success"):
-            raise RuntimeError(
-                "GPU worker is not reachable: "
-                + image_health.get("error", "unknown worker error")
-            )
+        # Slideshow mode requires the image endpoint. Cinematic mode uses
+        # the video endpoint and must not be blocked by an unrelated image check.
+        if data.render_mode == "slideshow":
+            image_health = worker_health()
+            if not image_health.get("success"):
+                raise RuntimeError(
+                    "GPU image worker is not reachable: "
+                    + image_health.get("error", "unknown worker error")
+                )
 
         if data.render_mode == "cinematic":
             video_health = video_worker_health()
@@ -615,14 +617,15 @@ def queue_job(data):
             "render_mode must be cinematic or slideshow",
         )
 
-    health = worker_health()
-
-    if not health.get("success"):
-        raise HTTPException(
-            503,
-            "GPU worker is not ready: "
-            + health.get("error", "not configured"),
-        )
+    # Check only the worker capability required by the selected render mode.
+    if data.render_mode == "slideshow":
+        health = worker_health()
+        if not health.get("success"):
+            raise HTTPException(
+                503,
+                "GPU image worker is not ready: "
+                + health.get("error", "not configured"),
+            )
 
     if data.render_mode == "cinematic":
         video_health = video_worker_health()
