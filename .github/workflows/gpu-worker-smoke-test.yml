@@ -1,0 +1,60 @@
+name: GPU Worker Docker Smoke Test
+
+on:
+  push:
+    branches:
+      - v2-testing
+    paths:
+      - "gpu_worker/**"
+      - ".github/workflows/gpu-worker-smoke-test.yml"
+  workflow_dispatch:
+
+jobs:
+  docker-smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build GPU worker image
+        run: docker build --pull -t viralverse-gpu-worker:ci ./gpu_worker
+
+      - name: Start worker container
+        run: |
+          docker run -d --name viralverse-gpu-worker -p 8000:8000 \
+            -e IMAGE_WORKER_TOKEN=ci-smoke-test-token \
+            viralverse-gpu-worker:ci
+
+      - name: Wait for health endpoint
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8000/health > health.json; then
+              cat health.json
+              exit 0
+            fi
+            sleep 5
+          done
+          docker logs viralverse-gpu-worker
+          exit 1
+
+      - name: Verify CPU-safe startup and image capability reporting
+        run: |
+          python - <<'PY'
+          import json
+          with open("health.json", encoding="utf-8") as handle:
+              health = json.load(handle)
+          assert health["status"] == "healthy", health
+          assert health["image_generation_available"] is False, health
+          assert health["models_loaded"]["image"] is False, health
+          assert health["models_loaded"]["video"] is False, health
+          print("GPU worker startup smoke test passed.")
+          PY
+
+      - name: Show worker logs on failure
+        if: failure()
+        run: docker logs viralverse-gpu-worker || true
+
+      - name: Clean up container
+        if: always()
+        run: docker rm -f viralverse-gpu-worker || true
