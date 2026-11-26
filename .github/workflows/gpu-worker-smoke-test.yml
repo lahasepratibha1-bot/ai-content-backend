@@ -20,6 +20,10 @@ jobs:
       - name: Build GPU worker image
         run: docker build --pull -t viralverse-gpu-worker:ci ./gpu_worker
 
+      - name: Verify Diffusers pipeline imports
+        run: |
+          docker run --rm viralverse-gpu-worker:ci python -c "from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image; from diffusers import LTXPipeline; print('SDXL and LTX pipeline imports passed')"
+
       - name: Start worker container
         run: |
           docker run -d --name viralverse-gpu-worker -p 8000:8000 \
