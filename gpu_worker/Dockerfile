@@ -3,7 +3,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 ENV MODEL_ID=stabilityai/sdxl-turbo
 ENV VIDEO_MODEL_ID=Lightricks/LTX-Video
-ENV MIN_VIDEO_VRAM_GB=10
+ENV MIN_VIDEO_VRAM_GB=24
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY main.py /app/main.py
