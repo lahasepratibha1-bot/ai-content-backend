@@ -67,10 +67,10 @@ def generate_scene_images(job_id: str, data: ImageRequest):
         if not reference and data.generate_character_reference:
             desc=job.get("character_description") or "main Indian story character, age and appearance suited to the story"
             prompt=("Photorealistic cinematic character continuity portrait, one main character only, "
-                    "waist-up, facing camera, neutral gentle expression, plain softly lit background. "
+                    "head-and-shoulders reference portrait with both shoulders fully visible, facing camera, neutral gentle expression, plain softly lit background. " 
                     f"Character appearance: {desc}. Realistic Indian cinema still, natural skin texture, "
-                    "clear face, consistent hairstyle and clothing, naturally proportionate neck length, realistic neck-to-shoulder proportions, anatomically balanced head and shoulders, no text, no labels, no watermark.")
-            raw=worker_call({"prompt":prompt,"negative_prompt":"multiple people, collage, extra faces, text, watermark, distorted face, bad anatomy, elongated neck, unusually long neck, unnaturally thin neck, disproportionate neck, deformed neck",
+                    "clear face, consistent hairstyle and clothing, average natural neck length and width, visible natural shoulder line, realistic neck-to-shoulder proportions, balanced head-to-body ratio, no elongated fashion-model neck, no text, no labels, no watermark.")
+            raw=worker_call({"prompt":prompt,"negative_prompt":"multiple people, collage, extra faces, text, watermark, distorted face, bad anatomy, elongated neck, unusually long neck, unnaturally thin neck, disproportionate neck, deformed neck, narrow sloping shoulders",
                 "width":data.width,"height":data.height,"steps":4,"guidance_scale":0.0,"seed":20261105})
             job["character_reference_url"]=save_png(raw,f"{job_id}_character_reference.png")
             reference=base64.b64encode(raw).decode("utf-8")
@@ -78,7 +78,7 @@ def generate_scene_images(job_id: str, data: ImageRequest):
         for scene in job["scenes"]:
             scene["image_status"]="processing"
             payload={"prompt":scene["image_prompt"],"negative_prompt":
-                "cartoon, illustration, painting, CGI, plastic skin, deformed hands, extra fingers, duplicate people, extra limbs, distorted face, elongated neck, unusually long neck, unnaturally thin neck, disproportionate neck, deformed neck, blurry, low quality, text, subtitles, logo, watermark",
+                "cartoon, illustration, painting, CGI, plastic skin, deformed hands, extra fingers, duplicate people, extra limbs, distorted face, elongated neck, unusually long neck, unnaturally thin neck, disproportionate neck, deformed neck, narrow sloping shoulders, tight headshot, beauty portrait, cropped shoulders, blurry, low quality, text, subtitles, logo, watermark",
                 "width":data.width,"height":data.height,"steps":4,"guidance_scale":0.0,
                 "seed":-1,"reference_image_base64":reference,"strength":data.strength}
             raw=worker_call(payload)
