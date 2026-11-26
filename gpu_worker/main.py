@@ -98,15 +98,37 @@ def load_image_models():
         return
     clear_models()
     dtype = torch.float16 if DEVICE == "cuda" else torch.float32
-    pipe = AutoPipelineForText2Image.from_pretrained(IMAGE_MODEL_ID, torch_dtype=dtype, use_safetensors=True)
-    pipe.to(DEVICE)
-    image_pipe = pipe
-    image_to_image_pipe = AutoPipelineForImage2Image.from_pipe(pipe)
-    image_to_image_pipe.to(DEVICE)
+    pipe = AutoPipelineForText2Image.from_pretrained(
+        IMAGE_MODEL_ID, torch_dtype=dtype, use_safetensors=True
+    )
     if DEVICE == "cuda":
-        image_pipe.enable_attention_slicing()
-        image_to_image_pipe.enable_attention_slicing()
+        # Keep most SDXL weights in system RAM and move modules to the T4 only
+        # while they are executing. This is substantially safer on 16 GB-class GPUs.
+        pipe.enable_model_cpu_offload()
+        pipe.enable_attention_slicing()
+    else:
+        pipe.to(DEVICE)
+    image_pipe = pipe
+    # Do not allocate a second image pipeline for ordinary text-to-image jobs.
+    # Image-to-image is initialized separately only when a reference image is used.
+    image_to_image_pipe = None
     active_model = "image"
+
+
+def load_image_to_image_model():
+    global image_to_image_pipe
+    if image_to_image_pipe is not None:
+        return
+    dtype = torch.float16 if DEVICE == "cuda" else torch.float32
+    pipe = AutoPipelineForImage2Image.from_pretrained(
+        IMAGE_MODEL_ID, torch_dtype=dtype, use_safetensors=True
+    )
+    if DEVICE == "cuda":
+        pipe.enable_model_cpu_offload()
+        pipe.enable_attention_slicing()
+    else:
+        pipe.to(DEVICE)
+    image_to_image_pipe = pipe
 
 
 def load_video_model():
@@ -157,6 +179,7 @@ def generate_image(data: ImageRequest, authorization: Optional[str] = Header(def
             gen = torch.Generator(device=DEVICE).manual_seed(data.seed) if data.seed >= 0 else None
             with torch.inference_mode():
                 if data.reference_image_base64:
+                    load_image_to_image_model()
                     from PIL import Image
                     import io
                     raw = base64.b64decode(data.reference_image_base64)
