@@ -22,7 +22,7 @@ jobs:
 
       - name: Verify Diffusers pipeline imports
         run: |
-          docker run --rm viralverse-gpu-worker:ci python -c "from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image; from diffusers import LTXPipeline; print('SDXL and LTX pipeline imports passed')"
+          docker run --rm viralverse-gpu-worker:ci python -c "import torch, torchvision; assert torch.__version__.startswith('2.5.1'), torch.__version__; from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image; from diffusers import LTXPipeline; print('PyTorch/torchvision and SDXL/LTX imports passed:', torch.__version__, torchvision.__version__)"
 
       - name: Start worker container
         run: |
