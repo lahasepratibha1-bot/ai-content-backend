@@ -174,7 +174,7 @@ def create_scene_plan(data: SceneRequest):
             f"Visual style: {data.visual_style}. "
             "Maintain identical character face, age, hairstyle, "
             "clothing and appearance across every scene. "
-            "Natural human anatomy, realistic skin texture, "
+            "Natural human anatomy with realistic neck length and natural neck-to-shoulder proportions, balanced head and shoulders, realistic skin texture, "
             "natural expressions, cinematic lighting, "
             "detailed Indian environment. "
             "No text, no subtitles, no logo, no watermark."
